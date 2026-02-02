@@ -4,22 +4,19 @@
 #include "QuakeCommon.h"
 
 // Epic
-#include "AssetToolsModule.h"
-#include "EditorClassUtils.h"
-#include "PackageTools.h"
-#include "Editor/EditorEngine.h"
-#include "Engine/World.h"
-#include "ThumbnailRendering/WorldThumbnailInfo.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/Package.h"
-
-#include "Editor/EditorEngine.h"
-#include "Editor.h"
 #include "UObject/UObjectGlobals.h"
-#include "Engine/StaticMeshActor.h"
+#include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "Engine/StaticMesh.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Modules/ModuleManager.h"
 
 // Quake Import
 #include "BspUtilities.h"
-#include "EntityMaker.h"
 
 DEFINE_LOG_CATEGORY(LogQuakeImporter);
 
@@ -28,12 +25,12 @@ DEFINE_LOG_CATEGORY(LogQuakeImporter);
 UBspFactory::UBspFactory(const FObjectInitializer& ObjectInitializer):
     Super(ObjectInitializer)
 {
-    SupportedClass = UPackage::StaticClass();
+    SupportedClass = UStaticMesh::StaticClass();
     Formats.Add(TEXT("bsp;Quake BSP model files"));
     bCreateNew = false;
     bEditorImport = true;
 }
-
+/*
 bool FindPlayerStart(const TArray<AttributeGroup>& entities)
 {
     for (const auto& it : entities)
@@ -49,38 +46,63 @@ bool FindPlayerStart(const TArray<AttributeGroup>& entities)
 
     return false;
 }
+*/
+static void MakeImportPaths(UObject* InParent, const FName& Name, FString& OutRootPath, FString& OutMapPath)
+{
+    const FString ParentPath = InParent ? InParent->GetName() : TEXT("/Game");
+    const FString MapName = Name.ToString();
+    const FString Suffix = TEXT("/") + MapName;
 
-UObject* UBspFactory::FactoryCreateBinary(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, UObject* Context, const TCHAR* Type, const uint8*& Buffer, const uint8* BufferEnd, FFeedbackContext* Warn)
+    // Depending on how the user imported, InParent may already be the map folder (e.g. /Game/MyFolder/e1m1)
+    // In that case, appending Name again would create /Game/MyFolder/e1m1/e1m1.
+    if (ParentPath.EndsWith(Suffix))
+    {
+        OutMapPath = ParentPath;
+        OutRootPath = FPackageName::GetLongPackagePath(ParentPath);
+    }
+    else
+    {
+        OutRootPath = ParentPath;
+        OutMapPath = ParentPath / MapName;
+    }
+}
+
+static UPackage* MakePackage(const FString& LongPackageName)
+{
+    return CreatePackage(*LongPackageName);
+}
+
+UObject* UBspFactory::FactoryCreateFile(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled)
 {
     using namespace bsputils;
+    bOutOperationCanceled = false;
 
-    // Create Packages
-    FString worldPackageName = TEXT("/Game/Maps/") / Name.ToString();
-    FString modelPackageName = TEXT("/Game/Models/") / Name.ToString() / Name.ToString();
-    FString texturePackageName = TEXT("/Game/Textures/Textures");
-    FString materialsPackageName = TEXT("/Game/Textures/Materials");
-
-    UPackage* worldPackage = CreatePackage(nullptr, *worldPackageName);
-    UPackage* modelPackage = CreatePackage(nullptr, *modelPackageName);
-    UPackage* texturePackage = CreatePackage(nullptr, *texturePackageName);
-    UPackage* materialPackage = CreatePackage(nullptr, *materialsPackageName);
-
-    //worldPackage->FullyLoad();
-    //modelPackage->FullyLoad();
-    //texturePackage->FullyLoad();
-    //materialPackage->FullyLoad();
-
-    // Check if we already have this world package
-
-    if (LoadObject<UWorld>(NULL, *worldPackageName, nullptr, LOAD_Quiet | LOAD_NoWarn))
+    TArray<uint8> FileData;
+    if (!FFileHelper::LoadFileToArray(FileData, *Filename))
     {
-        UE_LOG(LogQuakeImporter, Error, TEXT("Failed to import bsp file '%s'. Reimport not supported."), *Name.ToString());
+        UE_LOG(LogQuakeImporter, Error, TEXT("Failed to read bsp file '%s'"), *Filename);
         return nullptr;
     }
 
+    const uint8* Buffer = FileData.GetData();
+
+    FString RootPath;
+    FString MapPath;
+    MakeImportPaths(InParent, Name, RootPath, MapPath);
+
+    // Textures and materials are shared across maps.
+    // Default is sibling folders next to the map folder.
+    const FString TexturesPath = RootPath / TEXT("Textures");
+    const FString MaterialsPath = RootPath / TEXT("Materials");
+
+    auto CreateAssetPackage = [](const FString& LongPkg) -> UPackage*
+    {
+        return CreatePackage(*LongPkg);
+    };
+
     // Create Submodels
     BspLoader* loader = new BspLoader();
-    loader->Load(Buffer);
+    loader->Load(Buffer, FileData.Num());
     const bspformat29::Bsp_29* model = loader->GetBspPtr();
 
     if (!model)
@@ -98,107 +120,148 @@ UObject* UBspFactory::FactoryCreateBinary(UClass* InClass, UObject* InParent, FN
     }
 
     // Create Textures and Materials
-    for (const auto& it : model->textures)
+    TMap<FString, UMaterialInterface*> MaterialsByName;
+
+    static auto SanitizeSurfaceNameForAsset = [](const FString& InName) -> FString
     {
-        if (it.name.StartsWith("sky"))
+        FString Out = InName;
+        if (Out.StartsWith(TEXT("*")))
         {
-            // sky texture split the data buffer at the center and create 2 textures _front and _back
-            TArray<uint8> front;
-            TArray<uint8> back;
+            Out[0] = TCHAR('-');
+        }
 
-            for (unsigned i = 0; i < it.height; i++)
+        for (int32 I = 0; I < Out.Len(); I++)
+        {
+            const TCHAR C = Out[I];
+            if (!(FChar::IsAlnum(C) || C == TCHAR('_') || C == TCHAR('-')))
             {
-                for (unsigned j = 0; j < it.width; j++)
-                {
-                    unsigned pos = (i * it.width) + j;
+                Out[I] = TCHAR('_');
+            }
+        }
+        return Out;
+    };
 
-                    if (j < it.width / 2)
+    static auto IsTransparentSurfaceName = [](const FString& TexName) -> bool
+    {
+        if (TexName.StartsWith(TEXT("*")))
+        {
+            return true;
+        }
+        return TexName.Equals(TEXT("trigger"), ESearchCase::IgnoreCase);
+    };
+
+    // Create (or reuse) master materials in the shared materials folder.
+    // Instances will be shared across maps as well.
+    const FString SurfaceMasterName = TEXT("M_BSP_Surface");
+    UPackage* SurfaceMasterPkg = CreateAssetPackage(MaterialsPath / SurfaceMasterName);
+    UMaterial* SurfaceMasterMat = QuakeCommon::GetOrCreateMasterMaterial(SurfaceMasterName, *SurfaceMasterPkg);
+
+    const FString TransparentMasterName = TEXT("M_BSP_Transparent");
+    UPackage* TransparentMasterPkg = CreateAssetPackage(MaterialsPath / TransparentMasterName);
+    UMaterial* TransparentMasterMat = QuakeCommon::GetOrCreateTransparentMasterMaterial(TransparentMasterName, *TransparentMasterPkg);
+
+    auto CreateMaterialForTextureName = [&](const FString& TextureName, const FString& SafeTextureName, UTexture2D* Texture) -> void
+    {
+        if (!Texture)
+        {
+            return;
+        }
+
+        const bool bTransparent = IsTransparentSurfaceName(TextureName);
+        UMaterial* ParentMat = bTransparent ? TransparentMasterMat : SurfaceMasterMat;
+        if (!ParentMat)
+        {
+            return;
+        }
+
+        const FString InstanceName = TEXT("MI_") + SafeTextureName;
+        UPackage* MatPkg = CreateAssetPackage(MaterialsPath / InstanceName);
+        UMaterialInstanceConstant* MI = QuakeCommon::GetOrCreateMaterialInstance(InstanceName, *MatPkg, *ParentMat, *Texture);
+        if (MI)
+        {
+            MaterialsByName.Add(TextureName, MI);
+        }
+    };
+
+    auto CreateTexturePackageAndTexture = [&](const FString& TexOriginalName, int32 W, int32 H, const TArray<uint8>& Src) -> UTexture2D*
+    {
+        const FString SafeBaseName = SanitizeSurfaceNameForAsset(TexOriginalName);
+        const FString TexAssetName = TEXT("T_") + SafeBaseName;
+        UPackage* TexPkg = CreateAssetPackage(TexturesPath / TexAssetName);
+        return QuakeCommon::CreateUTexture2D(SafeBaseName, W, H, Src, *TexPkg, quakePalette);
+    };
+
+    for (const auto& ItTex : model->textures)
+    {
+        const FString SafeTexName = SanitizeSurfaceNameForAsset(ItTex.name);
+
+        if (ItTex.name.StartsWith(TEXT("sky")))
+        {
+            TArray<uint8> Front;
+            TArray<uint8> Back;
+            Front.Reserve((ItTex.width / 2) * ItTex.height);
+            Back.Reserve((ItTex.width / 2) * ItTex.height);
+
+            for (unsigned y = 0; y < ItTex.height; y++)
+            {
+                for (unsigned x = 0; x < ItTex.width; x++)
+                {
+                    const unsigned pos = (y * ItTex.width) + x;
+                    if (x < ItTex.width / 2)
                     {
-                        front.Add(it.mip0[pos]);
+                        Front.Add(ItTex.mip0[pos]);
                     }
                     else
                     {
-                        back.Add(it.mip0[pos]);
+                        Back.Add(ItTex.mip0[pos]);
                     }
                 }
             }
 
-            QuakeCommon::CreateUTexture2D(it.name + "_front", it.width / 2, it.height, front, *texturePackage, quakePalette);
-            UTexture2D* skyTexture = QuakeCommon::CreateUTexture2D(it.name + "_back", it.width / 2, it.height, back, *texturePackage, quakePalette);
-
-            QuakeCommon::CreateUMaterial(it.name, *materialPackage, *skyTexture);
+            CreateTexturePackageAndTexture(SanitizeSurfaceNameForAsset(ItTex.name + TEXT("_front")), ItTex.width / 2, ItTex.height, Front);
+            UTexture2D* BackTex = CreateTexturePackageAndTexture(SanitizeSurfaceNameForAsset(ItTex.name + TEXT("_back")), ItTex.width / 2, ItTex.height, Back);
+            CreateMaterialForTextureName(ItTex.name, SafeTexName, BackTex);
+            continue;
         }
-        else if (it.name.StartsWith("+0"))
+
+        if (ItTex.name.StartsWith(TEXT("+0")))
         {
-            // First flipbook frame. Append the rest.
-            TArray<uint8> data;
+            TArray<uint8> Data;
+            Data.Append(ItTex.mip0);
 
-            // append first frame data
-            data.Append(it.mip0);
-
-            int numFrames = 1;
-
-            while (AppendNextTextureData(it.name, numFrames, *model, data))
+            int32 NumFrames = 1;
+            while (AppendNextTextureData(ItTex.name, NumFrames, *model, Data))
             {
-                numFrames++;
+                NumFrames++;
             }
 
-            UTexture2D* flipbookTexture = QuakeCommon::CreateUTexture2D(it.name, it.width, it.height * numFrames, data, *texturePackage, quakePalette);
-            QuakeCommon::CreateUMaterial(it.name, *materialPackage, *flipbookTexture);
+            UTexture2D* FlipTex = CreateTexturePackageAndTexture(ItTex.name, ItTex.width, ItTex.height * NumFrames, Data);
+            CreateMaterialForTextureName(ItTex.name, SafeTexName, FlipTex);
+            continue;
         }
-        else
-        {
-            UTexture2D* texture = QuakeCommon::CreateUTexture2D(it.name, it.width, it.height, it.mip0, *texturePackage, quakePalette);
 
-            if (texture)
-            {
-                QuakeCommon::CreateUMaterial(it.name, *materialPackage, *texture);
-            }
-        }
+        UTexture2D* Tex = CreateTexturePackageAndTexture(ItTex.name, ItTex.width, ItTex.height, ItTex.mip0);
+        CreateMaterialForTextureName(ItTex.name, SafeTexName, Tex);
     }
 
-    // Deserialize entities
-    TArray<AttributeGroup> entities;
-    DeserializeGroup(model->entities, entities);
+    TArray<FString> WorldMeshObjectPaths;
+    ModelToStaticmeshes(*model, MapPath, MaterialsByName, WorldChunkMode == EWorldChunkMode::Grid, WorldChunkSize, ImportScale, &WorldMeshObjectPaths);
 
-    // Add Submodels
-    ModelToStaticmeshes(*model, *modelPackage, *materialPackage);
-
-    // Look for info_player_start. Map found without this are just normal pickup items made out of BSP.
-
-    if (FindPlayerStart(entities))
     {
-        // Create a new world.
-        UWorld* world = UWorld::CreateWorld(EWorldType::Inactive, false, Name, Cast<UPackage>(worldPackage), true, ERHIFeatureLevel::Num);
-        world->SetFlags(Flags);
-        world->ThumbnailInfo = NewObject<UWorldThumbnailInfo>(world, NAME_None, RF_Transactional);
-
-        // Add submodels 0 to level
-        FString model0Name = modelPackageName + ".submodel_0";
-        UStaticMesh* submodel = LoadObject<UStaticMesh>(NULL, *model0Name);
-
-        if (submodel != nullptr)
-        {
-            AStaticMeshActor* staticMesh = Cast<AStaticMeshActor>(GEditor->AddActor(world->GetCurrentLevel(), AStaticMeshActor::StaticClass(), FTransform()));
-
-            staticMesh->GetStaticMeshComponent()->Mobility = EComponentMobility::Static;
-            staticMesh->GetStaticMeshComponent()->SetStaticMesh(submodel);
-        }
-
-        GEditor->EditorUpdateComponents();
-        world->UpdateWorldComponents(true, false);
-
-
-        // Add entitites
-        EntityMaker(*world, entities);
+        FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+        TArray<FString> Paths;
+        Paths.Add(MapPath);
+        Paths.Add(TexturesPath);
+        Paths.Add(MaterialsPath);
+        ARM.Get().ScanPathsSynchronous(Paths, true);
+    }
+    UObject* ReturnObject = nullptr;
+    if (WorldMeshObjectPaths.Num() > 0)
+    {
+        ReturnObject = LoadObject<UStaticMesh>(nullptr, *WorldMeshObjectPaths[0]);
     }
 
-    QuakeCommon::SavePackage(*worldPackage);
-    QuakeCommon::SavePackage(*modelPackage);
-    QuakeCommon::SavePackage(*texturePackage);
-    QuakeCommon::SavePackage(*materialPackage);
-
-    return worldPackage;
+    return ReturnObject;
 }
 
 #undef LOCTEXT_NAMESPACE

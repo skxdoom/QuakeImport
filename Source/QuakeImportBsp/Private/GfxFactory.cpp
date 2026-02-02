@@ -3,7 +3,7 @@
 #include "GfxFactory.h"
 
 // Epic
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "PackageTools.h"
 #include "Engine/Texture2D.h"
@@ -36,7 +36,7 @@ UObject* UGfxFactory::FactoryCreateBinary(UClass* InClass, UObject* InParent, FN
 
     // Create Package
     FString packageName = TEXT("/Game/Graphics/Graphics");
-    UPackage* package = CreatePackage(nullptr, *packageName);
+    UPackage* package = CreatePackage(*packageName);
     package->FullyLoad();
 
     int width = 0;

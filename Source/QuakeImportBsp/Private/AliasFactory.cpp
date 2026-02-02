@@ -3,7 +3,7 @@
 #include "AliasFactory.h"
 
 // Epic
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "CoreMinimal.h"
 #include "EditorClassUtils.h"
@@ -58,29 +58,30 @@ void GenerateAnimations(const FString& name, const Alias& model, UPackage* packa
             color.R = FFloat16(-position.X); // flip x axis
             color.G = FFloat16(position.Y);
             color.B = FFloat16(position.Z);
-            color.A = 255;
+            color.A = FFloat16(1.0f);
             animationData.Add(color);
 		}
     }
 
     // Create Texture
     UTexture2D* animationTexture = NewObject<UTexture2D>(package, FName(*animationFilename), RF_Public | RF_Standalone);
-    animationTexture->AddToRoot();
+    animationTexture->SRGB = false;
 
-    EPixelFormat pixelformat = PF_A32B32G32R32F;
+    const EPixelFormat pixelformat = PF_FloatRGBA;
 
-    animationTexture->PlatformData = new FTexturePlatformData();
-    animationTexture->PlatformData->SizeX = width;
-    animationTexture->PlatformData->SizeY = height;
-    animationTexture->PlatformData->PixelFormat = pixelformat; // PF_B8G8R8A8
-    //animationTexture->PlatformData->NumSlices = 1;
+    FTexturePlatformData* platformData = new FTexturePlatformData();
+    platformData->SizeX = width;
+    platformData->SizeY = height;
+    platformData->PixelFormat = pixelformat;
+    animationTexture->SetPlatformData(platformData);
     animationTexture->MipGenSettings = TMGS_NoMipmaps;
     animationTexture->CompressionSettings = TextureCompressionSettings::TC_HDR;
     animationTexture->LODGroup = TextureGroup::TEXTUREGROUP_UI;
     animationTexture->Filter = TextureFilter::TF_Nearest;
 
     // Create first mip
-    FTexture2DMipMap* texmip = new(animationTexture->PlatformData->Mips) FTexture2DMipMap();
+    const int32 mipIndex = platformData->Mips.Add(new FTexture2DMipMap());
+    FTexture2DMipMap* texmip = &platformData->Mips[mipIndex];
 
     int32 nBlocksX = width / GPixelFormats[pixelformat].BlockSizeX;
     int32 nBlocksY = height / GPixelFormats[pixelformat].BlockSizeY;
@@ -90,7 +91,7 @@ void GenerateAnimations(const FString& name, const Alias& model, UPackage* packa
     uint8* animationTextureData = (uint8*)texmip->BulkData.Realloc(nBlocksX * nBlocksY * GPixelFormats[pixelformat].BlockBytes);
     FMemory::Memcpy(animationTextureData, animationData.GetData(), nBlocksX * nBlocksY * GPixelFormats[pixelformat].BlockBytes);
     texmip->BulkData.Unlock();
-    animationTexture->Source.Init(width, height, 1, 1, TSF_RGBA16F, animationTextureData);
+    animationTexture->Source.Init(width, height, 1, 1, TSF_RGBA16F, reinterpret_cast<const uint8*>(animationData.GetData()));
 
     FAssetRegistryModule::AssetCreated(animationTexture);
     animationTexture->UpdateResource();
@@ -126,22 +127,23 @@ void GenerateAnimationNormals(const FString& name, const Alias& model, UPackage*
 
     // Create Texture
     UTexture2D* normalTexture = NewObject<UTexture2D>(package, FName(*normalFilename), RF_Public | RF_Standalone);
-    normalTexture->AddToRoot();
+    normalTexture->SRGB = false;
 
-    EPixelFormat pixelformat = PF_B8G8R8A8;
+    const EPixelFormat pixelformat = PF_B8G8R8A8;
 
-    normalTexture->PlatformData = new FTexturePlatformData();
-    normalTexture->PlatformData->SizeX = width;
-    normalTexture->PlatformData->SizeY = height;
-    normalTexture->PlatformData->PixelFormat = pixelformat; // PF_B8G8R8A8
-    //normalTexture->PlatformData->NumSlices = 1;
+    FTexturePlatformData* normalPlatformData = new FTexturePlatformData();
+    normalPlatformData->SizeX = width;
+    normalPlatformData->SizeY = height;
+    normalPlatformData->PixelFormat = pixelformat;
+    normalTexture->SetPlatformData(normalPlatformData);
     normalTexture->MipGenSettings = TMGS_NoMipmaps;
     normalTexture->CompressionSettings = TextureCompressionSettings::TC_Normalmap;
     normalTexture->LODGroup = TextureGroup::TEXTUREGROUP_UI;
     normalTexture->Filter = TextureFilter::TF_Nearest;
 
     // Create first mip
-    FTexture2DMipMap* texmip = new(normalTexture->PlatformData->Mips) FTexture2DMipMap();
+    const int32 normalMipIndex = normalPlatformData->Mips.Add(new FTexture2DMipMap());
+    FTexture2DMipMap* texmip = &normalPlatformData->Mips[normalMipIndex];
 
     int32 nBlocksX = width / GPixelFormats[pixelformat].BlockSizeX;
     int32 nBlocksY = height / GPixelFormats[pixelformat].BlockSizeY;
@@ -151,7 +153,7 @@ void GenerateAnimationNormals(const FString& name, const Alias& model, UPackage*
     uint8* normalTextureData = (uint8*)texmip->BulkData.Realloc(nBlocksX * nBlocksY * GPixelFormats[pixelformat].BlockBytes);
     FMemory::Memcpy(normalTextureData, normalData.GetData(), nBlocksX * nBlocksY * GPixelFormats[pixelformat].BlockBytes);
     texmip->BulkData.Unlock();
-    normalTexture->Source.Init(width, height, 1, 1, TSF_BGRA8, normalTextureData);
+    normalTexture->Source.Init(width, height, 1, 1, TSF_BGRA8, normalData.GetData());
 
     FAssetRegistryModule::AssetCreated(normalTexture);
     normalTexture->UpdateResource();
@@ -162,7 +164,6 @@ void GenerateAnimationNormals(const FString& name, const Alias& model, UPackage*
 UStaticMesh* BuildStaticMesh(const FName& name, const Alias& model, UPackage* package)
 {
     UStaticMesh* staticmesh = NewObject<UStaticMesh>(package, name, RF_Public | RF_Standalone);
-    staticmesh->AddToRoot();
 
     FRawMesh* rmesh = new FRawMesh();
 
@@ -237,7 +238,7 @@ UObject* UAliasFactory::FactoryCreateBinary(UClass* InClass, UObject* InParent, 
     {
         // Create Package
         FString packageName = TEXT("/Game/Alias/") / Name.ToString();
-        UPackage* package = CreatePackage(nullptr, *packageName);
+        UPackage* package = CreatePackage(*packageName);
         package->FullyLoad();
 
         UStaticMesh* staticMesh = BuildStaticMesh(Name, *alias, package);
@@ -270,7 +271,6 @@ UObject* UAliasFactory::FactoryCreateBinary(UClass* InClass, UObject* InParent, 
             // 
             FString descFileName = Name.ToString() + "_desc";
             UDataTable* table = NewObject<UDataTable>(package, FName(*descFileName), RF_Public | RF_Standalone);
-            table->AddToRoot();
             table->RowStruct = FAliasFrameDesc::StaticStruct();
 
             FString datacsv;

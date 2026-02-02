@@ -5,18 +5,18 @@
 #include "QuakeCommon.h"
 
 // EPIC
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Interfaces/IPluginManager.h"
 #include "Containers/UnrealString.h"
 #include "Editor/EditorEngine.h"
-#include "Engine/Classes/Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionConstant.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Factories/MaterialFactoryNew.h"
 #include "Factories/TextureFactory.h"
 #include "Materials/Material.h"
 #include "Misc/FileHelper.h"
-#include "RawMesh/Public/RawMesh.h"
+#include "RawMesh.h"
 #include "UObject/Package.h"
 
 Alias::Alias(const FString name, const uint8*& buf) :

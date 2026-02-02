@@ -11,11 +11,31 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogQuakeImporter, Log, All);
 
+UENUM(BlueprintType)
+enum class EWorldChunkMode : uint8
+{
+    Leaves UMETA(DisplayName="Leaves"),
+    Grid UMETA(DisplayName="Grid")
+};
+
 UCLASS(MinimalAPI)
 class UBspFactory : public UFactory
 {
-    GENERATED_UCLASS_BODY()
+    GENERATED_BODY()
 
-    // FROM UFACTORY
-    virtual UObject* FactoryCreateBinary(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, UObject* Context, const TCHAR* Type, const uint8*& Buffer, const uint8* BufferEnd, FFeedbackContext* Warn) override;
+public:
+    UBspFactory(const FObjectInitializer& ObjectInitializer);
+
+    UPROPERTY(EditAnywhere, Category="Quake Import")
+    EWorldChunkMode WorldChunkMode = EWorldChunkMode::Leaves;
+
+    // Used only when WorldChunkMode is Grid.
+    UPROPERTY(EditAnywhere, Category="Quake Import", meta=(ClampMin="1"))
+    int32 WorldChunkSize = 2048;
+
+    // Optional scale applied to all imported geometry (Quake units to UE units).
+    UPROPERTY(EditAnywhere, Category="Quake Import", meta=(ClampMin="0.0001"))
+    float ImportScale = 1.0f;
+
+    virtual UObject* FactoryCreateFile(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled) override;
 };

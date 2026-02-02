@@ -200,8 +200,15 @@ void EntityMaker(UWorld& world, const TArray<AttributeGroup>& entities)
 
         if (classname == "light")
         {
-            ULevel* level = world.GetCurrentLevel();
-            APointLight* PointLight = Cast<APointLight>(GEditor->AddActor(world.GetCurrentLevel(), APointLight::StaticClass(), FTransform(origin)));
+            ULevel* Level = world.PersistentLevel;
+            if (!Level)
+            {
+                continue;
+            }
+
+            APointLight* PointLight = NewObject<APointLight>(Level, APointLight::StaticClass(), NAME_None, RF_Transactional);
+            Level->Actors.Add(PointLight);
+            PointLight->SetActorTransform(FTransform(origin));
 
             UPointLightComponent* pointlightComponent = PointLight->FindComponentByClass<UPointLightComponent>();
             pointlightComponent->SetMobility(EComponentMobility::Static);
@@ -211,8 +218,6 @@ void EntityMaker(UWorld& world, const TArray<AttributeGroup>& entities)
                 pointlightComponent->Intensity = it.Get("light")->ToInteger() * 10 * 2;
             }
 
-            GEditor->EditorUpdateComponents();
-            world.UpdateWorldComponents(true, false);
         }
     }
 }

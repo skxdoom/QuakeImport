@@ -4,6 +4,8 @@
 
 class UTexture2D;
 class UPackage;
+class UMaterial;
+class UMaterialInstanceConstant;
 
 namespace QuakeCommon
 {
@@ -24,6 +26,15 @@ namespace QuakeCommon
     // Create matching material for texture
     void CreateUMaterial(const FString& textureName, UPackage& materialPackage, UTexture2D& initialTexture);
 
+    // Create (or reuse) a master material that exposes a single albedo texture parameter.
+    UMaterial* GetOrCreateMasterMaterial(const FString& materialName, UPackage& materialPackage);
+
+    // Create (or reuse) a master translucent material that exposes the same color texture parameter and has constant 0.5 opacity.
+    UMaterial* GetOrCreateTransparentMasterMaterial(const FString& materialName, UPackage& materialPackage);
+
+    // Create (or reuse) a material instance that binds the master material's albedo parameter.
+    UMaterialInstanceConstant* GetOrCreateMaterialInstance(const FString& instanceName, UPackage& materialPackage, UMaterial& parentMaterial, UTexture2D& albedoTexture);
+
     // Utilities
 
     template<class T>
@@ -34,10 +45,16 @@ namespace QuakeCommon
     }
 
     template<typename T>
-    UObject* CheckIfAssetExist(FString name, const UPackage& package)
+    T* CheckIfAssetExist(const FString& name, const UPackage& package)
     {
-        FString fullname = package.GetName() + TEXT(".") + name;
-        return LoadObject<T>(NULL, *fullname, nullptr, LOAD_Quiet | LOAD_NoWarn);
+        const FString fullname = package.GetName() + TEXT(".") + name;
+        return LoadObject<T>(nullptr, *fullname, nullptr, LOAD_Quiet | LOAD_NoWarn);
+    }
+
+    template<typename T>
+    T* CheckIfAssetExist(const FString& name, const UPackage* package)
+    {
+        return package ? CheckIfAssetExist<T>(name, *package) : nullptr;
     }
 
     void SaveAsset(UObject& object, UPackage& package);

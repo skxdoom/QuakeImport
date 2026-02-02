@@ -7,6 +7,7 @@
 
 class UTexture2D;
 class UPackage;
+class UMaterialInterface;
 
 namespace bsputils
 {
@@ -202,12 +203,15 @@ namespace bsputils
         BspLoader();
         ~BspLoader();
 
-        void Load(const uint8*& data);
+        void Load(const uint8* data, int64 dataSize);
         const bspformat29::Bsp_29* GetBspPtr() const { return m_bsp29; }
 
     private:
 
         bspformat29::Bsp_29* m_bsp29;
+
+        const uint8* m_dataStart = nullptr;
+        int64 m_dataSize = 0;
 
         template<typename T>
         bool DeserializeLump(const uint8*& data, const bspformat29::Lump& lump, TArray<T>& out);
@@ -219,23 +223,41 @@ namespace bsputils
     template<typename T>
     bool BspLoader::DeserializeLump(const uint8*& data, const bspformat29::Lump& lump, TArray<T>& out)
     {
-        if (lump.length % sizeof(T))
+        const int64 Pos = int64(lump.position);
+        const int64 Len = int64(lump.length);
+        if (Pos < 0 || Len < 0 || Pos + Len > m_dataSize)
         {
-            UE_LOG(LogTemp, Log, TEXT("BSP Import error: Lump size mismatch!"));
+            UE_LOG(LogTemp, Warning, TEXT("BSP Import: Lump out of bounds (pos=%d len=%d size=%lld)"), lump.position, lump.length, m_dataSize);
             return false;
         }
 
-        uint32 count = lump.length / sizeof(T);
-        out.Empty();
-        T* in = (T*)(data + lump.position);
-        out.Append(in, count);
+        if ((Len % int64(sizeof(T))) != 0)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("BSP Import: Lump size mismatch (len=%d elem=%d)"), lump.length, int32(sizeof(T)));
+            return false;
+        }
+
+        const int64 Count64 = Len / int64(sizeof(T));
+        if (Count64 < 0 || Count64 > int64(MAX_int32))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("BSP Import: Lump element count invalid (%lld)"), Count64);
+            return false;
+        }
+
+        const int32 Count = int32(Count64);
+        out.Reset(Count);
+        out.SetNumUninitialized(Count);
+        FMemory::Memcpy(out.GetData(), data + Pos, size_t(Len));
         return true;
     }
 
     // UNREALED Import functions
     
-    // From a Quake BSP model, import all submodels to individual staticmeshes
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, UPackage& package, const UPackage& materialPackage);
+    // From a Quake BSP model, import submodels to individual staticmeshes.
+    // If bChunkWorld is true, submodel_0 (world) is split into multiple meshes.
+    // Chunking can be grid based (WorldChunkSize) or leaf based (when WorldChunkSize is ignored).
+    // OutWorldMeshObjectPaths will be filled with object paths for the created world chunks (or submodel_0 if not chunked).
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths);
 
     // Append texture pixel data to array
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data);
