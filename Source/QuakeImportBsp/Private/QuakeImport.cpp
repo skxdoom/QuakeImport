@@ -2,17 +2,34 @@
 
 #include "QuakeImport.h"
 
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
+#include "QuakeBspImportAssetTypeActions.h"
+
 #define LOCTEXT_NAMESPACE "FQuakeImportModule"
 
 void FQuakeImportModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+	TSharedPtr<IAssetTypeActions> Actions = MakeShared<FQuakeBspImportAssetTypeActions>();
+	AssetTools.RegisterAssetTypeActions(Actions.ToSharedRef());
+	RegisteredAssetTypeActions.Add(Actions);
 }
 
 void FQuakeImportModule::ShutdownModule()
 {
-	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-	// we call this function before unloading the module.
+	if (FModuleManager::Get().IsModuleLoaded("AssetTools"))
+	{
+		IAssetTools& AssetTools = FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools").Get();
+		for (const TSharedPtr<IAssetTypeActions>& Actions : RegisteredAssetTypeActions)
+		{
+			if (Actions.IsValid())
+			{
+				AssetTools.UnregisterAssetTypeActions(Actions.ToSharedRef());
+			}
+		}
+	}
+	RegisteredAssetTypeActions.Reset();
 }
 
 #undef LOCTEXT_NAMESPACE

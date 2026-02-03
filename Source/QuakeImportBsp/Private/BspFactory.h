@@ -26,16 +26,5 @@ class UBspFactory : public UFactory
 public:
     UBspFactory(const FObjectInitializer& ObjectInitializer);
 
-    UPROPERTY(EditAnywhere, Category="Quake Import")
-    EWorldChunkMode WorldChunkMode = EWorldChunkMode::Leaves;
-
-    // Used only when WorldChunkMode is Grid.
-    UPROPERTY(EditAnywhere, Category="Quake Import", meta=(ClampMin="1"))
-    int32 WorldChunkSize = 2048;
-
-    // Optional scale applied to all imported geometry (Quake units to UE units).
-    UPROPERTY(EditAnywhere, Category="Quake Import", meta=(ClampMin="0.0001"))
-    float ImportScale = 1.0f;
-
     virtual UObject* FactoryCreateFile(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled) override;
 };

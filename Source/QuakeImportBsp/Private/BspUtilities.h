@@ -257,7 +257,7 @@ namespace bsputils
     // If bChunkWorld is true, submodel_0 (world) is split into multiple meshes.
     // Chunking can be grid based (WorldChunkSize) or leaf based (when WorldChunkSize is ignored).
     // OutWorldMeshObjectPaths will be filled with object paths for the created world chunks (or submodel_0 if not chunked).
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths);
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths);
 
     // Append texture pixel data to array
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data);

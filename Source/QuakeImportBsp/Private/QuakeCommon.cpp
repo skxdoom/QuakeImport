@@ -8,7 +8,6 @@
 #include "Factories/MaterialFactoryNew.h"
 #include "Factories/TextureFactory.h"
 #include "Materials/Material.h"
-#include "Materials/MaterialEditorOnlyData.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"

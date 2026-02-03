@@ -215,16 +215,17 @@ namespace bsputils
         TMap<int32, int32> TextureIdToSlot;
     };
 
-    static FIntPoint GetChunkKey2D(const FVector3f& Center, int32 ChunkSize)
+    static FIntVector GetChunkKey3D(const FVector3f& Center, int32 ChunkSize)
     {
         if (ChunkSize <= 0)
         {
-            return FIntPoint(0, 0);
+            return FIntVector(0, 0, 0);
         }
 
         const int32 X = FMath::FloorToInt(float(Center.X) / float(ChunkSize));
         const int32 Y = FMath::FloorToInt(float(Center.Y) / float(ChunkSize));
-        return FIntPoint(X, Y);
+        const int32 Z = FMath::FloorToInt(float(Center.Z) / float(ChunkSize));
+        return FIntVector(X, Y, Z);
     }
 
     static int32 GetOrAddMaterialSlot(FWorldChunkBuild& Chunk, int32 TextureId)
@@ -394,7 +395,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         StaticMesh->PostEditChange();
     }
 
-    static void CreateWorldChunks(const FString& MeshesPath, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
+    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
     {
         using namespace bsputils;
 
@@ -414,7 +415,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             FWorldChunkBuild Transparent;
         };
 
-        TMap<FIntPoint, FChunkPair> ChunkMap;
+        TMap<FIntVector, FChunkPair> ChunkMap;
 
         const int32 FirstFace = Model.submodels[0].firstface;
         const int32 FaceCount = Model.submodels[0].numfaces;
@@ -474,7 +475,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
             Temp.Center = Sum / float(Temp.BspVertexIds.Num());
 
-            const FIntPoint Key = GetChunkKey2D(Temp.Center, ChunkSize);
+            const FIntVector Key = GetChunkKey3D(Temp.Center, ChunkSize);
             FChunkPair& Pair = ChunkMap.FindOrAdd(Key);
             FWorldChunkBuild& Chunk = bTransparent ? Pair.Transparent : Pair.Opaque;
 
@@ -505,12 +506,12 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
         for (const auto& PairIt : ChunkMap)
         {
-            const FIntPoint Key = PairIt.Key;
+            const FIntVector Key = PairIt.Key;
             const FChunkPair& Pair = PairIt.Value;
 
             if (Pair.Opaque.RawMesh.WedgeIndices.Num() > 0)
             {
-                const FString ChunkName = FString::Printf(TEXT("SM_chunk_%d_%d"), Key.X, Key.Y);
+                const FString ChunkName = FString::Printf(TEXT("SM_%s_%d_%d_%d"), *MapName, Key.X, Key.Y, Key.Z);
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
@@ -524,7 +525,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
             if (Pair.Transparent.RawMesh.WedgeIndices.Num() > 0)
             {
-                const FString ChunkName = FString::Printf(TEXT("SM_chunk_%d_%d_Trans"), Key.X, Key.Y);
+                const FString ChunkName = FString::Printf(TEXT("SM_%s_%d_%d_%d_Trans"), *MapName, Key.X, Key.Y, Key.Z);
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
@@ -887,11 +888,11 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         delete rmesh;
     }
 
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
     {
         if (bChunkWorld)
         {
-            CreateWorldChunks(MeshesPath, model, MaterialsByName, WorldChunkSize, ImportScale, OutWorldMeshObjectPaths);
+            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, WorldChunkSize, ImportScale, OutWorldMeshObjectPaths);
             return;
         }
 
