@@ -322,7 +322,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         return TexName.Equals(TEXT("trigger"), ESearchCase::IgnoreCase);
     }
 
-    static void BuildStaticMesh(UStaticMesh* StaticMesh, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const FWorldChunkBuild& Chunk, int32 LightmapSize, bool bEnableCollision)
+    static void BuildStaticMesh(UStaticMesh* StaticMesh, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const FWorldChunkBuild& Chunk, int32 LightmapSize, const FName& CollisionProfileName)
     {
         if (!StaticMesh)
         {
@@ -377,10 +377,12 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
         if (BodySetup)
         {
+            const bool bEnableCollision = (CollisionProfileName != NAME_None) && (CollisionProfileName != UCollisionProfile::NoCollision_ProfileName);
+
             if (bEnableCollision)
             {
                 BodySetup->CollisionTraceFlag = CTF_UseComplexAsSimple;
-                BodySetup->DefaultInstance.SetCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
+                BodySetup->DefaultInstance.SetCollisionProfileName(CollisionProfileName);
                 BodySetup->InvalidatePhysicsData();
                 BodySetup->CreatePhysicsMeshes();
             }
@@ -395,7 +397,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         StaticMesh->PostEditChange();
     }
 
-    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
+    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
     {
         using namespace bsputils;
 
@@ -415,7 +417,9 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             FWorldChunkBuild Transparent;
         };
 
-        TMap<FIntVector, FChunkPair> ChunkMap;
+        TMap<FIntVector, FChunkPair> BspChunkMap;
+        TMap<FIntVector, FWorldChunkBuild> WaterChunkMap;
+        TMap<FIntVector, FWorldChunkBuild> SkyChunkMap;
 
         const int32 FirstFace = Model.submodels[0].firstface;
         const int32 FaceCount = Model.submodels[0].numfaces;
@@ -426,12 +430,19 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             const bspformat29::TexInfo& Ti = Model.texinfos[Face.texinfo];
             const bspformat29::Texture& Tex = Model.textures[Ti.miptex];
 
-            if (Tex.name.StartsWith(TEXT("sky")))
+            const bool bIsSky = Tex.name.StartsWith(TEXT("sky"));
+            const bool bIsWater = Tex.name.StartsWith(TEXT("*"));
+
+            if (bIsSky && !bIncludeSky)
+            {
+                continue;
+            }
+            if (bIsWater && !bIncludeWater)
             {
                 continue;
             }
 
-            const bool bTransparent = IsTransparentSurfaceName(Tex.name);
+            const bool bTransparent = (!bIsSky && !bIsWater) ? IsTransparentSurfaceName(Tex.name) : false;
 
             FFaceTemp Temp;
             Temp.TexInfo = Face.texinfo;
@@ -476,8 +487,23 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             Temp.Center = Sum / float(Temp.BspVertexIds.Num());
 
             const FIntVector Key = GetChunkKey3D(Temp.Center, ChunkSize);
-            FChunkPair& Pair = ChunkMap.FindOrAdd(Key);
-            FWorldChunkBuild& Chunk = bTransparent ? Pair.Transparent : Pair.Opaque;
+            FWorldChunkBuild* ChunkPtr = nullptr;
+
+            if (bIsSky)
+            {
+                ChunkPtr = &SkyChunkMap.FindOrAdd(Key);
+            }
+            else if (bIsWater)
+            {
+                ChunkPtr = &WaterChunkMap.FindOrAdd(Key);
+            }
+            else
+            {
+                FChunkPair& Pair = BspChunkMap.FindOrAdd(Key);
+                ChunkPtr = bTransparent ? &Pair.Transparent : &Pair.Opaque;
+            }
+
+            FWorldChunkBuild& Chunk = *ChunkPtr;
 
             for (int32 J = 0; J < Temp.NumTris; J++)
             {
@@ -504,42 +530,84 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
         const int32 LightmapSize = 128;
 
-        for (const auto& PairIt : ChunkMap)
+        for (const auto& PairIt : BspChunkMap)
         {
             const FIntVector Key = PairIt.Key;
             const FChunkPair& Pair = PairIt.Value;
 
             if (Pair.Opaque.RawMesh.WedgeIndices.Num() > 0)
             {
-                const FString ChunkName = FString::Printf(TEXT("SM_%s_%d_%d_%d"), *MapName, Key.X, Key.Y, Key.Z);
+                const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_%d_%d_%d"), *MapName, Key.X, Key.Y, Key.Z);
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, true);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile);
 
-                if (OutWorldMeshObjectPaths)
+                if (OutBspMeshObjectPaths)
                 {
-                    OutWorldMeshObjectPaths->Add(StaticMesh->GetPathName());
+                    OutBspMeshObjectPaths->Add(StaticMesh->GetPathName());
                 }
             }
 
             if (Pair.Transparent.RawMesh.WedgeIndices.Num() > 0)
             {
-                const FString ChunkName = FString::Printf(TEXT("SM_%s_%d_%d_%d_Trans"), *MapName, Key.X, Key.Y, Key.Z);
+                const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_%d_%d_%d_Trans"), *MapName, Key.X, Key.Y, Key.Z);
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, false);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile);
 
-                if (OutWorldMeshObjectPaths)
+                if (OutBspMeshObjectPaths)
                 {
-                    OutWorldMeshObjectPaths->Add(StaticMesh->GetPathName());
+                    OutBspMeshObjectPaths->Add(StaticMesh->GetPathName());
                 }
+            }
+        }
+
+        for (const auto& It : WaterChunkMap)
+        {
+            const FIntVector Key = It.Key;
+            const FWorldChunkBuild& Chunk = It.Value;
+            if (Chunk.RawMesh.WedgeIndices.Num() <= 0)
+            {
+                continue;
+            }
+
+            const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_Water_%d_%d_%d"), *MapName, Key.X, Key.Y, Key.Z);
+            const FString LongPkg = MeshesPath / ChunkName;
+            UPackage* Pkg = CreateAssetPackage(LongPkg);
+            UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile);
+
+            if (OutWaterMeshObjectPaths)
+            {
+                OutWaterMeshObjectPaths->Add(StaticMesh->GetPathName());
+            }
+        }
+
+        for (const auto& It : SkyChunkMap)
+        {
+            const FIntVector Key = It.Key;
+            const FWorldChunkBuild& Chunk = It.Value;
+            if (Chunk.RawMesh.WedgeIndices.Num() <= 0)
+            {
+                continue;
+            }
+
+            const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_Sky_%d_%d_%d"), *MapName, Key.X, Key.Y, Key.Z);
+            const FString LongPkg = MeshesPath / ChunkName;
+            UPackage* Pkg = CreateAssetPackage(LongPkg);
+            UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile);
+
+            if (OutSkyMeshObjectPaths)
+            {
+                OutSkyMeshObjectPaths->Add(StaticMesh->GetPathName());
             }
         }
     }
 
-    static void CreateLeafChunks(const FString& MeshesPath, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
+    static void CreateLeafChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
     {
         using namespace bsputils;
 
@@ -550,6 +618,8 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         };
 
         TMap<int32, FLeafPair> LeafToChunk;
+        TMap<int32, FWorldChunkBuild> WaterLeafToChunk;
+        TMap<int32, FWorldChunkBuild> SkyLeafToChunk;
 
         for (int32 LeafIndex = 0; LeafIndex < Model.leaves.Num(); LeafIndex++)
         {
@@ -589,13 +659,34 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const bspformat29::Face& Face = Model.faces[FaceIndex];
                 const bspformat29::TexInfo& Ti = Model.texinfos[Face.texinfo];
                 const bspformat29::Texture& Tex = Model.textures[Ti.miptex];
-                if (Tex.name.StartsWith(TEXT("sky")))
+                const bool bIsSky = Tex.name.StartsWith(TEXT("sky"));
+                const bool bIsWater = Tex.name.StartsWith(TEXT("*"));
+
+                if (bIsSky && !bIncludeSky)
+                {
+                    continue;
+                }
+                if (bIsWater && !bIncludeWater)
                 {
                     continue;
                 }
 
-                const bool bTransparent = IsTransparentSurfaceName(Tex.name);
-                FWorldChunkBuild& Chunk = bTransparent ? Pair.Transparent : Pair.Opaque;
+                FWorldChunkBuild* ChunkPtr = nullptr;
+                if (bIsSky)
+                {
+                    ChunkPtr = &SkyLeafToChunk.FindOrAdd(LeafIndex);
+                }
+                else if (bIsWater)
+                {
+                    ChunkPtr = &WaterLeafToChunk.FindOrAdd(LeafIndex);
+                }
+                else
+                {
+                    const bool bTransparent = IsTransparentSurfaceName(Tex.name);
+                    ChunkPtr = bTransparent ? &Pair.Transparent : &Pair.Opaque;
+                }
+
+                FWorldChunkBuild& Chunk = *ChunkPtr;
 
                 FVector Normal;
                 for (int32 N = 0; N < 3; N++)
@@ -663,32 +754,178 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
             if (Pair.Opaque.RawMesh.WedgeIndices.Num() > 0)
             {
-                const FString ChunkName = FString::Printf(TEXT("SM_leaf_%d"), LeafIndex);
+                const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_leaf_%d"), *MapName, LeafIndex);
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, true);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile);
 
-                if (OutWorldMeshObjectPaths)
+                if (OutBspMeshObjectPaths)
                 {
-                    OutWorldMeshObjectPaths->Add(StaticMesh->GetPathName());
+                    OutBspMeshObjectPaths->Add(StaticMesh->GetPathName());
                 }
             }
 
             if (Pair.Transparent.RawMesh.WedgeIndices.Num() > 0)
             {
-                const FString ChunkName = FString::Printf(TEXT("SM_leaf_%d_Trans"), LeafIndex);
+                const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_leaf_%d_Trans"), *MapName, LeafIndex);
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, false);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile);
 
-                if (OutWorldMeshObjectPaths)
+                if (OutBspMeshObjectPaths)
                 {
-                    OutWorldMeshObjectPaths->Add(StaticMesh->GetPathName());
+                    OutBspMeshObjectPaths->Add(StaticMesh->GetPathName());
                 }
             }
         }
+
+        for (const auto& It : WaterLeafToChunk)
+        {
+            const int32 LeafIndex = It.Key;
+            const FWorldChunkBuild& Chunk = It.Value;
+            if (Chunk.RawMesh.WedgeIndices.Num() <= 0)
+            {
+                continue;
+            }
+
+            const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_Water_leaf_%d"), *MapName, LeafIndex);
+            const FString LongPkg = MeshesPath / ChunkName;
+            UPackage* Pkg = CreateAssetPackage(LongPkg);
+            UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile);
+
+            if (OutWaterMeshObjectPaths)
+            {
+                OutWaterMeshObjectPaths->Add(StaticMesh->GetPathName());
+            }
+        }
+
+        for (const auto& It : SkyLeafToChunk)
+        {
+            const int32 LeafIndex = It.Key;
+            const FWorldChunkBuild& Chunk = It.Value;
+            if (Chunk.RawMesh.WedgeIndices.Num() <= 0)
+            {
+                continue;
+            }
+
+            const FString ChunkName = FString::Printf(TEXT("SM_%s_BSP_World_Sky_leaf_%d"), *MapName, LeafIndex);
+            const FString LongPkg = MeshesPath / ChunkName;
+            UPackage* Pkg = CreateAssetPackage(LongPkg);
+            UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile);
+
+            if (OutSkyMeshObjectPaths)
+            {
+                OutSkyMeshObjectPaths->Add(StaticMesh->GetPathName());
+            }
+        }
+    }
+
+    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& Model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath)
+    {
+        if (!Model.submodels.IsValidIndex(SubModelId))
+        {
+            return false;
+        }
+
+        FWorldChunkBuild Chunk;
+        bool bAnyFace = false;
+        bool bAnyTriggerTex = false;
+
+        const bspformat29::SubModel& Sub = Model.submodels[SubModelId];
+        for (int32 F = Sub.firstface; F < Sub.firstface + Sub.numfaces; F++)
+        {
+            if (!Model.faces.IsValidIndex(F))
+            {
+                continue;
+            }
+
+            const bspformat29::Face& Face = Model.faces[F];
+            const bspformat29::TexInfo& Ti = Model.texinfos[Face.texinfo];
+            const bspformat29::Texture& Tex = Model.textures[Ti.miptex];
+
+            bAnyFace = true;
+            if (Tex.name.Equals(TEXT("trigger"), ESearchCase::IgnoreCase))
+            {
+                bAnyTriggerTex = true;
+            }
+
+            FVector Normal;
+            for (int32 N = 0; N < 3; N++)
+            {
+                Normal[N] = Model.planes[Face.planenum].normal[N];
+            }
+
+            TArray<int32> BspVertexIds;
+            TArray<FVector2f> TexCoords;
+            BspVertexIds.Reserve(Face.numedges);
+            TexCoords.Reserve(Face.numedges);
+
+            for (int32 E = Face.numedges; E-- > 0;)
+            {
+                const bspformat29::Surfedge& Surfedge = Model.surfedges[Face.firstedge + E];
+                const bspformat29::Edge& Edge = Model.edges[abs(Surfedge.index)];
+
+                int32 VertexId = Edge.first;
+                if (Surfedge.index < 0)
+                {
+                    VertexId = Edge.second;
+                }
+
+                BspVertexIds.Add(VertexId);
+
+                const bspformat29::Point3f& P = Model.vertices[VertexId];
+                const FVector3f Unflipped(P.x, P.y, P.z);
+
+                FVector2f TexCoord;
+                TexCoord.X = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
+                TexCoord.Y = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
+                TexCoord.X /= Tex.width;
+                TexCoord.Y /= Tex.height;
+                TexCoords.Add(TexCoord);
+            }
+
+            const int32 NumTris = int32(Face.numedges) - 2;
+            for (int32 J = 0; J < NumTris; J++)
+            {
+                const int32 A = 0;
+                const int32 B = J + 1;
+                const int32 C = J + 2;
+
+                const uint32 VA = GetOrAddLocalVertex(Chunk, Model, BspVertexIds[A], ImportScale);
+                const uint32 VB = GetOrAddLocalVertex(Chunk, Model, BspVertexIds[B], ImportScale);
+                const uint32 VC = GetOrAddLocalVertex(Chunk, Model, BspVertexIds[C], ImportScale);
+
+                const FVector3f N(Normal.X, Normal.Y, Normal.Z);
+                AddWedgeEntry(Chunk.RawMesh, VA, N, TexCoords[A], TexCoords[A]);
+                AddWedgeEntry(Chunk.RawMesh, VB, N, TexCoords[B], TexCoords[B]);
+                AddWedgeEntry(Chunk.RawMesh, VC, N, TexCoords[C], TexCoords[C]);
+
+                const int32 TextureId = Model.texinfos[Face.texinfo].miptex;
+                const int32 Slot = GetOrAddMaterialSlot(Chunk, TextureId);
+                Chunk.RawMesh.FaceMaterialIndices.Add(Slot);
+                Chunk.RawMesh.FaceSmoothingMasks.Add(0);
+            }
+        }
+
+        if (!bAnyFace || Chunk.RawMesh.WedgeIndices.Num() == 0)
+        {
+            return false;
+        }
+
+        const FString LongPkg = MeshesPath / MeshAssetName;
+        UPackage* Pkg = CreateAssetPackage(LongPkg);
+        UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, MeshAssetName);
+
+        const int32 LightmapSize = 64;
+        const FName CollisionProfile = bAnyTriggerTex ? UCollisionProfile::NoCollision_ProfileName : DefaultCollisionProfile;
+        BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, CollisionProfile);
+
+        OutObjectPath = StaticMesh->GetPathName();
+        return true;
     }
 
     void CreateSubmodel(UPackage& package, const uint8 id, const bspformat29::Bsp_29& model, const TMap<FString, UMaterialInterface*>& MaterialsByName)
@@ -888,15 +1125,15 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         delete rmesh;
     }
 
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, TArray<FString>* OutWorldMeshObjectPaths)
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
     {
         if (bChunkWorld)
         {
-            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, WorldChunkSize, ImportScale, OutWorldMeshObjectPaths);
+            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, WorldChunkSize, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths);
             return;
         }
 
-        CreateLeafChunks(MeshesPath, model, MaterialsByName, ImportScale, OutWorldMeshObjectPaths);
+        CreateLeafChunks(MeshesPath, MapName, model, MaterialsByName, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths);
     }
 
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data)

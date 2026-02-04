@@ -39,6 +39,8 @@ public class QuakeImport : ModuleRules
 				"Slate",
 				"SlateCore",
 				"UnrealEd",
+				"LevelInstance",
+				"LevelInstanceEditor",
 				"AssetTools",
 				"Projects",
 				"RawMesh",

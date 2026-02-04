@@ -35,85 +35,154 @@ namespace QuakeCommon
         return false;
     }
 
-    UTexture2D* CreateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool savePackage)
-    {
+	UTexture2D* CreateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool savePackage)
+	{
 		// Defensive validation: some BSPs reference external WAD textures (or contain bad miptex headers)
 		// which can yield invalid sizes and crash inside FTextureSource::Init.
 		if (width <= 0 || height <= 0)
 		{
 			return nullptr;
 		}
-
-		// Reasonable sanity limits for Quake-era textures (also protects against corrupted files).
 		if (width > 8192 || height > 8192)
 		{
 			return nullptr;
 		}
 
-		// The source data is 8-bit palette indices, one byte per pixel.
 		const int64 PixelCount = int64(width) * int64(height);
-		if (PixelCount <= 0)
+		if (PixelCount <= 0 || data.Num() != PixelCount)
 		{
 			return nullptr;
 		}
-		if (data.Num() != PixelCount)
+
+		const FString FinalName = TEXT("T_") + name;
+		if (UTexture2D* Existing = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage))
+		{
+			return Existing;
+		}
+
+		TArray<uint8> FinalData;
+		FinalData.Reserve(int32(PixelCount) * 4);
+		for (const uint8& It : data)
+		{
+			FinalData.Add(pal[It].b);
+			FinalData.Add(pal[It].g);
+			FinalData.Add(pal[It].r);
+			FinalData.Add(255);
+		}
+
+		UTexture2D* Texture = NewObject<UTexture2D>(&texturePackage, FName(*FinalName), RF_Public | RF_Standalone);
+		if (!Texture)
 		{
 			return nullptr;
 		}
-        FString finalName = TEXT("T_") + name;
 
-        if (UTexture2D* Existing = CheckIfAssetExist<UTexture2D>(finalName, texturePackage))
-        {
-            return Existing;
-        }
+		Texture->SRGB = true;
+		Texture->Filter = TF_Nearest;
+		Texture->LODGroup = TEXTUREGROUP_Pixels2D;
+		Texture->NeverStream = true;
 
-        // get colors from palette
-        TArray<uint8> finalData;
+		FTexturePlatformData* PlatformData = new FTexturePlatformData();
+		PlatformData->SizeX = width;
+		PlatformData->SizeY = height;
+		PlatformData->PixelFormat = PF_B8G8R8A8;
+		Texture->SetPlatformData(PlatformData);
 
-        for (const auto& it : data)
-        {
-            finalData.Add(pal[it].b);
-            finalData.Add(pal[it].g);
-            finalData.Add(pal[it].r);
-            finalData.Add(255);
-        }
+		const int32 MipIndex = PlatformData->Mips.Add(new FTexture2DMipMap());
+		FTexture2DMipMap* TexMip = &PlatformData->Mips[MipIndex];
+		TexMip->SizeX = width;
+		TexMip->SizeY = height;
+		TexMip->BulkData.Lock(LOCK_READ_WRITE);
+		const uint32 TextureDataSize = (width * height) * sizeof(uint8) * 4;
+		uint8* TextureData = (uint8*)TexMip->BulkData.Realloc(TextureDataSize);
+		FMemory::Memcpy(TextureData, FinalData.GetData(), TextureDataSize);
+		TexMip->BulkData.Unlock();
 
-        // Create Texture
-        UTexture2D* texture = NewObject<UTexture2D>(&texturePackage, FName(*finalName), RF_Public | RF_Standalone);
+		Texture->MipGenSettings = TMGS_NoMipmaps;
+		Texture->CompressionSettings = TextureCompressionSettings::TC_Default;
+		Texture->Source.Init(width, height, 1, 1, TSF_BGRA8, FinalData.GetData());
 
-        texture->SRGB = true;
-        texture->Filter = TF_Nearest;
-        texture->LODGroup = TEXTUREGROUP_Pixels2D;
-        texture->NeverStream = true;
+		FAssetRegistryModule::AssetCreated(Texture);
+		Texture->UpdateResource();
+		texturePackage.MarkPackageDirty();
+		return Texture;
+	}
 
-        FTexturePlatformData* platformData = new FTexturePlatformData();
-        platformData->SizeX = width;
-        platformData->SizeY = height;
-        platformData->PixelFormat = PF_B8G8R8A8;
-        texture->SetPlatformData(platformData);
+	UTexture2D* CreateOrUpdateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool bOverwrite, bool savePackage)
+	{
+		if (!bOverwrite)
+		{
+			return CreateUTexture2D(name, width, height, data, texturePackage, pal, savePackage);
+		}
+		if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
+		{
+			return nullptr;
+		}
 
-        // Create first mip
-        const int32 mipIndex = platformData->Mips.Add(new FTexture2DMipMap());
-        FTexture2DMipMap* texmip = &platformData->Mips[mipIndex];
-        texmip->SizeX = width;
-        texmip->SizeY = height;
-        texmip->BulkData.Lock(LOCK_READ_WRITE);
-        uint32 textureDataSize = (width * height) * sizeof(uint8) * 4;
-        uint8* textureData = (uint8*)texmip->BulkData.Realloc(textureDataSize);
-        FMemory::Memcpy(textureData, finalData.GetData(), textureDataSize);
-        texmip->BulkData.Unlock();
+		const int64 PixelCount = int64(width) * int64(height);
+		if (PixelCount <= 0 || data.Num() != PixelCount)
+		{
+			return nullptr;
+		}
 
-        texture->MipGenSettings = TMGS_NoMipmaps;
-        texture->CompressionSettings = TextureCompressionSettings::TC_Default;
-        texture->Source.Init(width, height, 1, 1, TSF_BGRA8, finalData.GetData());
+		const FString FinalName = TEXT("T_") + name;
 
-        FAssetRegistryModule::AssetCreated(texture);
+		TArray<uint8> FinalData;
+		FinalData.Reserve(int32(PixelCount) * 4);
+		for (const uint8& It : data)
+		{
+			FinalData.Add(pal[It].b);
+			FinalData.Add(pal[It].g);
+			FinalData.Add(pal[It].r);
+			FinalData.Add(255);
+		}
 
-        texture->UpdateResource();
-        texturePackage.MarkPackageDirty();
+		UTexture2D* Texture = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage);
+		if (!Texture)
+		{
+			Texture = NewObject<UTexture2D>(&texturePackage, FName(*FinalName), RF_Public | RF_Standalone);
+			if (!Texture)
+			{
+				return nullptr;
+			}
+			FAssetRegistryModule::AssetCreated(Texture);
+		}
 
-        return texture;
-    }
+		Texture->PreEditChange(nullptr);
+		Texture->SRGB = true;
+		Texture->Filter = TF_Nearest;
+		Texture->LODGroup = TEXTUREGROUP_Pixels2D;
+		Texture->NeverStream = true;
+		Texture->MipGenSettings = TMGS_NoMipmaps;
+		Texture->CompressionSettings = TextureCompressionSettings::TC_Default;
+
+		FTexturePlatformData* PlatformData = Texture->GetPlatformData();
+		if (!PlatformData)
+		{
+			PlatformData = new FTexturePlatformData();
+			Texture->SetPlatformData(PlatformData);
+		}
+		PlatformData->SizeX = width;
+		PlatformData->SizeY = height;
+		PlatformData->PixelFormat = PF_B8G8R8A8;
+
+		PlatformData->Mips.Empty();
+		const int32 MipIndex = PlatformData->Mips.Add(new FTexture2DMipMap());
+		FTexture2DMipMap* TexMip = &PlatformData->Mips[MipIndex];
+		TexMip->SizeX = width;
+		TexMip->SizeY = height;
+		TexMip->BulkData.Lock(LOCK_READ_WRITE);
+		const uint32 TextureDataSize = (width * height) * sizeof(uint8) * 4;
+		uint8* TextureData = (uint8*)TexMip->BulkData.Realloc(TextureDataSize);
+		FMemory::Memcpy(TextureData, FinalData.GetData(), TextureDataSize);
+		TexMip->BulkData.Unlock();
+
+		Texture->Source.Init(width, height, 1, 1, TSF_BGRA8, FinalData.GetData());
+		Texture->UpdateResource();
+		Texture->MarkPackageDirty();
+		texturePackage.MarkPackageDirty();
+		Texture->PostEditChange();
+		return Texture;
+	}
 
     void CreateUMaterial(const FString& materialName, UPackage& materialPackage, UTexture2D& initialTexture)
     {
@@ -229,7 +298,58 @@ namespace QuakeCommon
         return Material;
     }
 
+    UMaterial* GetOrCreateSkyUnlitMasterMaterial(const FString& materialName, UPackage& materialPackage)
+    {
+        if (UMaterial* Existing = CheckIfAssetExist<UMaterial>(materialName, materialPackage))
+        {
+            return Existing;
+        }
+
+        UMaterial* Material = NewObject<UMaterial>(&materialPackage, FName(*materialName), RF_Public | RF_Standalone);
+        if (!Material)
+        {
+            return nullptr;
+        }
+
+        Material->BlendMode = BLEND_Opaque;
+        Material->SetShadingModel(MSM_Unlit);
+        Material->TwoSided = false;
+
+        UMaterialExpressionTextureSampleParameter2D* TexParam = NewObject<UMaterialExpressionTextureSampleParameter2D>(Material);
+        TexParam->ParameterName = ColorParamName;
+        TexParam->SamplerType = SAMPLERTYPE_Color;
+        TexParam->MaterialExpressionEditorX = -400;
+        TexParam->MaterialExpressionEditorY = 0;
+
+        if (UMaterialEditorOnlyData* EditorOnly = Material->GetEditorOnlyData())
+        {
+            EditorOnly->ExpressionCollection.Expressions.Add(TexParam);
+            EditorOnly->EmissiveColor.Connect(0, TexParam);
+            EditorOnly->Roughness.Constant = 1.0f;
+            EditorOnly->Metallic.Constant = 0.0f;
+            EditorOnly->Specular.Constant = 0.0f;
+        }
+
+        FAssetRegistryModule::AssetCreated(Material);
+        Material->PreEditChange(nullptr);
+        Material->MarkPackageDirty();
+        materialPackage.SetDirtyFlag(true);
+        Material->PostEditChange();
+
+        return Material;
+    }
+
     UMaterialInstanceConstant* GetOrCreateMaterialInstance(const FString& instanceName, UPackage& materialPackage, UMaterial& parentMaterial, UTexture2D& albedoTexture)
+    {
+        return GetOrCreateMaterialInstance(instanceName, materialPackage, (UMaterialInterface&)parentMaterial, albedoTexture);
+    }
+
+	UMaterialInstanceConstant* GetOrCreateMaterialInstance(const FString& instanceName, UPackage& materialPackage, UMaterial& parentMaterial, UTexture2D& albedoTexture, bool bOverwrite)
+	{
+		return GetOrCreateMaterialInstance(instanceName, materialPackage, (UMaterialInterface&)parentMaterial, albedoTexture, bOverwrite);
+	}
+
+    UMaterialInstanceConstant* GetOrCreateMaterialInstance(const FString& instanceName, UPackage& materialPackage, UMaterialInterface& parentMaterial, UTexture2D& albedoTexture)
     {
         if (UMaterialInstanceConstant* Existing = CheckIfAssetExist<UMaterialInstanceConstant>(instanceName, materialPackage))
         {
@@ -254,6 +374,44 @@ namespace QuakeCommon
         MI->PostEditChange();
         return MI;
     }
+
+	UMaterialInstanceConstant* GetOrCreateMaterialInstance(const FString& instanceName, UPackage& materialPackage, UMaterialInterface& parentMaterial, UTexture2D& albedoTexture, bool bOverwrite)
+	{
+		if (UMaterialInstanceConstant* Existing = CheckIfAssetExist<UMaterialInstanceConstant>(instanceName, materialPackage))
+		{
+			if (!bOverwrite)
+			{
+				return Existing;
+			}
+
+			Existing->PreEditChange(nullptr);
+			Existing->SetParentEditorOnly(&parentMaterial);
+			const FMaterialParameterInfo Info(ColorParamName);
+			Existing->SetTextureParameterValueEditorOnly(Info, &albedoTexture);
+			Existing->MarkPackageDirty();
+			materialPackage.SetDirtyFlag(true);
+			Existing->PostEditChange();
+			return Existing;
+		}
+
+		UMaterialInstanceConstant* MI = NewObject<UMaterialInstanceConstant>(&materialPackage, FName(*instanceName), RF_Public | RF_Standalone);
+		if (!MI)
+		{
+			return nullptr;
+		}
+
+		MI->SetParentEditorOnly(&parentMaterial);
+		MI->PreEditChange(nullptr);
+
+		const FMaterialParameterInfo Info(ColorParamName);
+		MI->SetTextureParameterValueEditorOnly(Info, &albedoTexture);
+
+		FAssetRegistryModule::AssetCreated(MI);
+		MI->MarkPackageDirty();
+		materialPackage.SetDirtyFlag(true);
+		MI->PostEditChange();
+		return MI;
+	}
 
     void SaveAsset(UObject& object, UPackage& package)
     {
