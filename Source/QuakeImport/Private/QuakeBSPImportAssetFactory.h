@@ -2,14 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "Factories/Factory.h"
-#include "QuakeBspImportAssetFactory.generated.h"
+#include "QuakeBSPImportAssetFactory.generated.h"
 
 UCLASS()
-class UQuakeBspImportAssetFactory : public UFactory
+class UQuakeBSPImportAssetFactory : public UFactory
 {
     GENERATED_BODY()
 
 public:
-    UQuakeBspImportAssetFactory();
+    UQuakeBSPImportAssetFactory();
     virtual UObject* FactoryCreateNew(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, UObject* Context, FFeedbackContext* Warn) override;
 };

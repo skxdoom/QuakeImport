@@ -4,14 +4,14 @@
 
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
-#include "QuakeBspImportAssetTypeActions.h"
+#include "QuakeBSPImportAssetTypeActions.h"
 
 #define LOCTEXT_NAMESPACE "FQuakeImportModule"
 
 void FQuakeImportModule::StartupModule()
 {
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-	TSharedPtr<IAssetTypeActions> Actions = MakeShared<FQuakeBspImportAssetTypeActions>();
+	TSharedPtr<IAssetTypeActions> Actions = MakeShared<FQuakeBSPImportAssetTypeActions>();
 	AssetTools.RegisterAssetTypeActions(Actions.ToSharedRef());
 	RegisteredAssetTypeActions.Add(Actions);
 }

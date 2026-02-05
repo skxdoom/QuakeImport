@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 
-class UQuakeBspImportAsset;
+class UQuakeBSPImportAsset;
 class ULevel;
 
 namespace QuakeLevelInstanceUtils
@@ -15,11 +15,11 @@ namespace QuakeLevelInstanceUtils
 
     // Ensure the import asset has a generated sublevel asset for the requested kind.
     // Returns the ULevel of that generated sublevel asset (the content source that Level Instances reference).
-    bool EnsureGeneratedLevelReady(UQuakeBspImportAsset& ImportAsset, const FString& MapName, const FString& FolderLongPackagePath, EGenLevelKind Kind, ULevel*& OutLoadedLevel);
+    bool EnsureGeneratedLevelReady(UQuakeBSPImportAsset& ImportAsset, const FString& MapName, const FString& FolderLongPackagePath, EGenLevelKind Kind, ULevel*& OutLoadedLevel);
 
     // If placed Level Instances referencing the generated level asset exist in the currently opened persistent level,
     // unload/reload them so they reflect the latest saved state.
-    void RefreshPlacedLevelInstances(UQuakeBspImportAsset& ImportAsset, EGenLevelKind Kind);
+    void RefreshPlacedLevelInstances(UQuakeBSPImportAsset& ImportAsset, EGenLevelKind Kind);
 
     // Deletes previously generated actors from the given level.
     void ClearGeneratedActors(ULevel& TargetLevel, EGenLevelKind Kind);

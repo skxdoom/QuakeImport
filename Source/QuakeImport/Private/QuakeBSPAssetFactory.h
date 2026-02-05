@@ -7,24 +7,15 @@
 #include "Engine/EngineTypes.h"
 #include "RHIDefinitions.h"
 #include "Factories/Factory.h"
-#include "BspFactory.generated.h"
-
-DECLARE_LOG_CATEGORY_EXTERN(LogQuakeImporter, Log, All);
-
-UENUM(BlueprintType)
-enum class EWorldChunkMode : uint8
-{
-    Leaves UMETA(DisplayName="Leaves"),
-    Grid UMETA(DisplayName="Grid")
-};
+#include "QuakeBSPAssetFactory.generated.h"
 
 UCLASS(MinimalAPI)
-class UBspFactory : public UFactory
+class UQuakeBSPAssetFactory : public UFactory
 {
     GENERATED_BODY()
 
 public:
-    UBspFactory(const FObjectInitializer& ObjectInitializer);
+    UQuakeBSPAssetFactory(const FObjectInitializer& ObjectInitializer);
 
     virtual UObject* FactoryCreateFile(UClass* InClass, UObject* InParent, FName Name, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled) override;
 };

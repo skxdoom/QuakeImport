@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "QuakeCommon.h"
+#include "QuakeImportCommon.h"
 
 class UTexture2D;
 class UPackage;
@@ -252,14 +252,35 @@ namespace bsputils
     }
 
     // UNREALED Import functions
+
+    struct FLightmapAtlasFace
+    {
+        int32 X = 0;
+        int32 Y = 0;
+        int32 W = 0;
+        int32 H = 0;
+        int32 TexMinS = 0;
+        int32 TexMinT = 0;
+    };
+
+    struct FLightmapAtlas
+    {
+        int32 AtlasW = 0;
+        int32 AtlasH = 0;
+        TMap<int32, FLightmapAtlasFace> FaceToAtlas;
+        FString LightmapTextureObjectPath;
+    };
+
+    bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& LightmapsPath, const FString& MapName, bool bOverwrite, FLightmapAtlas& OutAtlas);
+
     
     // From a Quake BSP model, import submodels to individual staticmeshes.
     // If bChunkWorld is true, submodel_0 (world) is split into multiple meshes.
     // Chunking can be grid based (WorldChunkSize) or leaf based (when WorldChunkSize is ignored).
     // OutWorldMeshObjectPaths will be filled with object paths for the created world chunks (or submodel_0 if not chunked).
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths);
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths, const FLightmapAtlas* LightmapAtlas);
 
-    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath);
+    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath, const FLightmapAtlas* LightmapAtlas);
 
     // Append texture pixel data to array
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data);

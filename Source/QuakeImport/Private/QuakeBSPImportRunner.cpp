@@ -1,7 +1,7 @@
-#include "QuakeBspImportRunner.h"
+#include "QuakeBSPImportRunner.h"
 
-#include "BspUtilities.h"
-#include "QuakeCommon.h"
+#include "QuakeBSPUtilities.h"
+#include "QuakeImportCommon.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Materials/Material.h"
@@ -341,7 +341,7 @@ namespace QuakeBspImportRunner
 {
 	bool ImportBspWorld(const FString& BspFilePath, const FString& TargetFolderLongPackagePath,
 		EWorldChunkMode WorldChunkMode, int32 WorldChunkSize, float ImportScale, bool bIncludeSky,
-		bool bIncludeWater, bool bOverwriteMaterialsAndTextures, UMaterialInterface* BspParentOverride,
+		bool bIncludeWater, bool bImportLightmaps, bool bOverwriteMaterialsAndTextures, UMaterialInterface* BspParentOverride,
 	                    UMaterialInterface* WaterParentOverride, UMaterialInterface* SkyParentOverride,
 	                    const FName& BspCollisionProfile, const FName& WaterCollisionProfile,
 	                    const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths,
@@ -362,24 +362,54 @@ namespace QuakeBspImportRunner
 			return false;
 		}
 
+		bsputils::FLightmapAtlas Atlas;
+		const bsputils::FLightmapAtlas* AtlasPtr = nullptr;
+		if (bImportLightmaps)
+		{
+			const FString LightmapsPath = Ctx.MapPath / TEXT("Lightmaps");
+			if (bsputils::BuildLightmapAtlas(*Ctx.Model, LightmapsPath, Ctx.MapName, bOverwriteMaterialsAndTextures, Atlas))
+			{
+				AtlasPtr = &Atlas;
+				UTexture2D* LightmapTex = LoadObject<UTexture2D>(nullptr, *Atlas.LightmapTextureObjectPath, nullptr, LOAD_Quiet | LOAD_NoWarn);
+				if (LightmapTex)
+				{
+					const FMaterialParameterInfo LMInfo(TEXT("Lightmap"));
+					for (auto& It : MaterialsByName)
+					{
+						if (UMaterialInstanceConstant* MI = Cast<UMaterialInstanceConstant>(It.Value))
+						{
+							MI->PreEditChange(nullptr);
+							MI->SetTextureParameterValueEditorOnly(LMInfo, LightmapTex);
+							MI->MarkPackageDirty();
+							MI->PostEditChange();
+						}
+					}
+				}
+			}
+		}
+
 		const FString WorldMeshesPath = Ctx.MapPath / TEXT("World");
 		const bool bChunkWorld = (WorldChunkMode == EWorldChunkMode::Grid);
 		ModelToStaticmeshes(*Ctx.Model, WorldMeshesPath, Ctx.MapName, MaterialsByName, bChunkWorld, WorldChunkSize,
 		                    ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile,
-		                    SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths);
+		                    SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, AtlasPtr);
 
 		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 		TArray<FString> Paths;
 		Paths.Add(WorldMeshesPath);
 		Paths.Add(Ctx.TexturesPath);
 		Paths.Add(Ctx.MaterialsPath);
+		if (bImportLightmaps)
+		{
+			Paths.Add(Ctx.MapPath / TEXT("Lightmaps"));
+		}
 		ARM.Get().ScanPathsSynchronous(Paths, true);
 
 		return true;
 	}
 
 	bool ImportBspEntities(const FString& BspFilePath, const FString& TargetFolderLongPackagePath, float ImportScale,
-		bool bImportFuncDoors, bool bImportFuncPlats, bool bImportTriggers, bool bOverwriteMaterialsAndTextures,
+		bool bImportFuncDoors, bool bImportFuncPlats, bool bImportTriggers, bool bImportLightmaps, bool bOverwriteMaterialsAndTextures,
 		UMaterialInterface* SolidParentOverride, UMaterialInterface* WaterParentOverride,
 		UMaterialInterface* SkyParentOverride, UMaterialInterface* TriggerParentOverride,
 		const FName& SolidCollisionProfile, const FName& TriggerCollisionProfile,
@@ -404,6 +434,34 @@ namespace QuakeBspImportRunner
 		ParseEntitiesForBmodels(Ctx.Model->entities, Parsed);
 
 		const FString EntitiesMeshesPath = Ctx.MapPath / TEXT("Entities");
+
+		bsputils::FLightmapAtlas Atlas;
+		const bsputils::FLightmapAtlas* AtlasPtr = nullptr;
+		if (bImportLightmaps)
+		{
+			const FString LightmapsPath = Ctx.MapPath / TEXT("Lightmaps");
+			if (bsputils::BuildLightmapAtlas(*Ctx.Model, LightmapsPath, Ctx.MapName, bOverwriteMaterialsAndTextures, Atlas))
+			{
+				AtlasPtr = &Atlas;
+				UTexture2D* LightmapTex = LoadObject<UTexture2D>(nullptr, *Atlas.LightmapTextureObjectPath, nullptr, LOAD_Quiet | LOAD_NoWarn);
+				if (LightmapTex)
+				{
+					const FMaterialParameterInfo LMInfo(TEXT("Lightmap"));
+					for (auto& It : MaterialsByName)
+					{
+						if (UMaterialInstanceConstant* MI = Cast<UMaterialInstanceConstant>(It.Value))
+						{
+							MI->PreEditChange(nullptr);
+							MI->SetTextureParameterValueEditorOnly(LMInfo, LightmapTex);
+							MI->MarkPackageDirty();
+							MI->PostEditChange();
+						}
+					}
+				}
+			}
+		}
+
+
 
 		if (OutSolidEntityMeshObjectPaths)
 		{
@@ -449,7 +507,7 @@ namespace QuakeBspImportRunner
 			FString ObjPath;
 			if (!CreateSubmodelStaticMesh(*Ctx.Model, EntitiesMeshesPath, MeshName, uint8(E.SubModelIndex),
 				MaterialsByName, ImportScale, UseCollisionProfile.IsNone() ? UCollisionProfile::BlockAll_ProfileName : UseCollisionProfile,
-				ObjPath))
+				ObjPath, AtlasPtr))
 			{
 				continue;
 			}
@@ -475,6 +533,10 @@ namespace QuakeBspImportRunner
 		Paths.Add(EntitiesMeshesPath);
 		Paths.Add(Ctx.TexturesPath);
 		Paths.Add(Ctx.MaterialsPath);
+		if (bImportLightmaps)
+		{
+			Paths.Add(Ctx.MapPath / TEXT("Lightmaps"));
+		}
 		ARM.Get().ScanPathsSynchronous(Paths, true);
 
 		return true;

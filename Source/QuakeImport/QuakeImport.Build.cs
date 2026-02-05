@@ -39,7 +39,7 @@ public class QuakeImport : ModuleRules
 				"Slate",
 				"SlateCore",
 				"UnrealEd",
-				"LevelInstance",
+				//"LevelInstance",
 				"LevelInstanceEditor",
 				"AssetTools",
 				"Projects",

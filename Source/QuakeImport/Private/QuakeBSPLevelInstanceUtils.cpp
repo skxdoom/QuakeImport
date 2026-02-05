@@ -1,6 +1,6 @@
-#include "QuakeLevelInstanceUtils.h"
+#include "QuakeBSPLevelInstanceUtils.h"
 
-#include "QuakeBspImportAsset.h"
+#include "QuakeBSPImportAsset.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
@@ -89,7 +89,7 @@ namespace
 		return UEditorLoadingAndSavingUtils::SavePackages(Packages, true);
 	}
 
-	TSoftObjectPtr<UWorld>& GetGeneratedLevelRef(UQuakeBspImportAsset& ImportAsset,
+	TSoftObjectPtr<UWorld>& GetGeneratedLevelRef(UQuakeBSPImportAsset& ImportAsset,
 	                                             QuakeLevelInstanceUtils::EGenLevelKind Kind)
 	{
 		if (Kind == QuakeLevelInstanceUtils::EGenLevelKind::Entities)
@@ -99,7 +99,7 @@ namespace
 		return ImportAsset.GeneratedLevelBsp;
 	}
 
-	FGuid& GetLevelInstanceIdRef(UQuakeBspImportAsset& ImportAsset, QuakeLevelInstanceUtils::EGenLevelKind Kind)
+	FGuid& GetLevelInstanceIdRef(UQuakeBSPImportAsset& ImportAsset, QuakeLevelInstanceUtils::EGenLevelKind Kind)
 	{
 		if (Kind == QuakeLevelInstanceUtils::EGenLevelKind::Entities)
 		{
@@ -190,7 +190,7 @@ namespace
 
 namespace QuakeLevelInstanceUtils
 {
-	bool EnsureGeneratedLevelReady(UQuakeBspImportAsset& ImportAsset, const FString& MapName,
+	bool EnsureGeneratedLevelReady(UQuakeBSPImportAsset& ImportAsset, const FString& MapName,
 	                               const FString& FolderLongPackagePath, EGenLevelKind Kind, ULevel*& OutLoadedLevel)
 	{
 		OutLoadedLevel = nullptr;
@@ -263,7 +263,7 @@ namespace QuakeLevelInstanceUtils
 		return true;
 	}
 
-	void RefreshPlacedLevelInstances(UQuakeBspImportAsset& ImportAsset, EGenLevelKind Kind)
+	void RefreshPlacedLevelInstances(UQuakeBSPImportAsset& ImportAsset, EGenLevelKind Kind)
 	{
 #if QUAKEIMPORT_HAS_LEVELINSTANCE
 		if (!ImportAsset.bAutoSaveGeneratedLevel && !ImportAsset.bAutoReloadPlacedLevelInstances)

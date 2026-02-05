@@ -1,8 +1,8 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 // QuakeImport
-#include "BspUtilities.h"
-#include "QuakeCommon.h"
+#include "QuakeBSPUtilities.h"
+#include "QuakeImportCommon.h"
 
 // EPIC
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -205,6 +205,7 @@ namespace bsputils
         mesh.WedgeColors.Add(FColor(0));
         mesh.WedgeTangentZ.Add(normal);
         mesh.WedgeTexCoords[0].Add(texcoord0);
+        mesh.WedgeTexCoords[1].Add(texcoord1);
     }
 
     struct FWorldChunkBuild
@@ -322,7 +323,356 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         return TexName.Equals(TEXT("trigger"), ESearchCase::IgnoreCase);
     }
 
-    static void BuildStaticMesh(UStaticMesh* StaticMesh, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const FWorldChunkBuild& Chunk, int32 LightmapSize, const FName& CollisionProfileName)
+
+struct FFaceLightmapCalc
+{
+    int32 FaceIndex = -1;
+    int32 TexMinS = 0;
+    int32 TexMinT = 0;
+    int32 W = 0;
+    int32 H = 0;
+    int32 LightOfs = -1;
+};
+
+static void ComputeFaceLightmapDimensions(const bspformat29::Bsp_29& Model, int32 FaceIndex, int32& OutTexMinS, int32& OutTexMinT, int32& OutW, int32& OutH)
+{
+    OutTexMinS = 0;
+    OutTexMinT = 0;
+    OutW = 0;
+    OutH = 0;
+
+    if (!Model.faces.IsValidIndex(FaceIndex))
+    {
+        return;
+    }
+
+    const bspformat29::Face& Face = Model.faces[FaceIndex];
+    if (!Model.texinfos.IsValidIndex(Face.texinfo))
+    {
+        return;
+    }
+
+    const bspformat29::TexInfo& Ti = Model.texinfos[Face.texinfo];
+
+    float MinS = 0.0f;
+    float MaxS = 0.0f;
+    float MinT = 0.0f;
+    float MaxT = 0.0f;
+    bool bInit = false;
+
+    for (int32 E = Face.numedges; E-- > 0;)
+    {
+        const bspformat29::Surfedge& Surfedge = Model.surfedges[Face.firstedge + E];
+        const bspformat29::Edge& Edge = Model.edges[abs(Surfedge.index)];
+
+        int32 VertexId = Edge.first;
+        if (Surfedge.index < 0)
+        {
+            VertexId = Edge.second;
+        }
+
+        if (!Model.vertices.IsValidIndex(VertexId))
+        {
+            continue;
+        }
+
+        const bspformat29::Point3f& P = Model.vertices[VertexId];
+        const FVector3f Unflipped(P.x, P.y, P.z);
+
+        const float S = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
+        const float T = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
+
+        if (!bInit)
+        {
+            MinS = MaxS = S;
+            MinT = MaxT = T;
+            bInit = true;
+        }
+        else
+        {
+            MinS = FMath::Min(MinS, S);
+            MaxS = FMath::Max(MaxS, S);
+            MinT = FMath::Min(MinT, T);
+            MaxT = FMath::Max(MaxT, T);
+        }
+    }
+
+    if (!bInit)
+    {
+        return;
+    }
+
+    const int32 TexMinS = FMath::FloorToInt(MinS / 16.0f) * 16;
+    const int32 TexMinT = FMath::FloorToInt(MinT / 16.0f) * 16;
+    const int32 TexMaxS = FMath::CeilToInt(MaxS / 16.0f) * 16;
+    const int32 TexMaxT = FMath::CeilToInt(MaxT / 16.0f) * 16;
+
+    const int32 ExtS = FMath::Max(0, TexMaxS - TexMinS);
+    const int32 ExtT = FMath::Max(0, TexMaxT - TexMinT);
+
+    OutTexMinS = TexMinS;
+    OutTexMinT = TexMinT;
+    OutW = (ExtS / 16) + 1;
+    OutH = (ExtT / 16) + 1;
+}
+
+bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& LightmapsPath, const FString& MapName, bool bOverwrite, FLightmapAtlas& OutAtlas)
+{
+    OutAtlas = FLightmapAtlas();
+
+    if (Model.lightdata.Num() == 0)
+    {
+        return false;
+    }
+
+    TArray<FFaceLightmapCalc> Faces;
+    Faces.Reserve(Model.faces.Num());
+
+    for (int32 FaceIndex = 0; FaceIndex < Model.faces.Num(); FaceIndex++)
+    {
+        const bspformat29::Face& Face = Model.faces[FaceIndex];
+        if (Face.lightofs < 0)
+        {
+            continue;
+        }
+
+        if (uint8(Face.styles[0]) == 255)
+        {
+            continue;
+        }
+
+        int32 TexMinS = 0;
+        int32 TexMinT = 0;
+        int32 W = 0;
+        int32 H = 0;
+        ComputeFaceLightmapDimensions(Model, FaceIndex, TexMinS, TexMinT, W, H);
+        if (W <= 0 || H <= 0)
+        {
+            continue;
+        }
+
+        const int64 BytesNeeded = int64(Face.lightofs) + int64(W) * int64(H);
+        if (BytesNeeded > int64(Model.lightdata.Num()))
+        {
+            continue;
+        }
+
+        FFaceLightmapCalc Info;
+        Info.FaceIndex = FaceIndex;
+        Info.TexMinS = TexMinS;
+        Info.TexMinT = TexMinT;
+        Info.W = W;
+        Info.H = H;
+        Info.LightOfs = Face.lightofs;
+        Faces.Add(Info);
+    }
+
+    if (Faces.Num() == 0)
+    {
+        return false;
+    }
+
+    Faces.Sort([](const FFaceLightmapCalc& A, const FFaceLightmapCalc& B)
+    {
+        if (A.H != B.H)
+        {
+            return A.H > B.H;
+        }
+        return A.W > B.W;
+    });
+
+    const int32 MaxAtlasSize = 4096;
+    int32 AtlasSize = 1024;
+    bool bPacked = false;
+
+    struct FPlaced
+    {
+        int32 FaceIndex = -1;
+        int32 X = 0;
+        int32 Y = 0;
+        int32 W = 0;
+        int32 H = 0;
+        int32 TexMinS = 0;
+        int32 TexMinT = 0;
+        int32 LightOfs = -1;
+    };
+
+    TArray<FPlaced> Placed;
+
+    while (AtlasSize <= MaxAtlasSize && !bPacked)
+    {
+        Placed.Reset();
+
+        int32 CursorX = 0;
+        int32 CursorY = 0;
+        int32 RowH = 0;
+
+        bool bFail = false;
+
+        for (const FFaceLightmapCalc& F : Faces)
+        {
+            const int32 Pad = 2;
+            const int32 RW = F.W + Pad * 2;
+            const int32 RH = F.H + Pad * 2;
+
+            if (RW > AtlasSize || RH > AtlasSize)
+            {
+                bFail = true;
+                break;
+            }
+
+            if (CursorX + RW > AtlasSize)
+            {
+                CursorX = 0;
+                CursorY += RowH;
+                RowH = 0;
+            }
+
+            if (CursorY + RH > AtlasSize)
+            {
+                bFail = true;
+                break;
+            }
+
+            FPlaced P;
+            P.FaceIndex = F.FaceIndex;
+            P.X = CursorX + Pad;
+            P.Y = CursorY + Pad;
+            P.W = F.W;
+            P.H = F.H;
+            P.TexMinS = F.TexMinS;
+            P.TexMinT = F.TexMinT;
+            P.LightOfs = F.LightOfs;
+            Placed.Add(P);
+
+            CursorX += RW;
+            RowH = FMath::Max(RowH, RH);
+        }
+
+        if (!bFail)
+        {
+            bPacked = true;
+            break;
+        }
+
+        AtlasSize *= 2;
+    }
+
+    if (!bPacked)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("BSP Import: Could not pack lightmaps into an atlas (too large)"));
+        return false;
+    }
+
+    OutAtlas.AtlasW = AtlasSize;
+    OutAtlas.AtlasH = AtlasSize;
+
+    TArray<uint8> AtlasData;
+    AtlasData.SetNumZeroed(AtlasSize * AtlasSize);
+
+    for (const FPlaced& P : Placed)
+    {
+        const int32 FaceIndex = P.FaceIndex;
+        FLightmapAtlasFace FaceInfo;
+        FaceInfo.X = P.X;
+        FaceInfo.Y = P.Y;
+        FaceInfo.W = P.W;
+        FaceInfo.H = P.H;
+        FaceInfo.TexMinS = P.TexMinS;
+        FaceInfo.TexMinT = P.TexMinT;
+        OutAtlas.FaceToAtlas.Add(FaceIndex, FaceInfo);
+
+        const int32 SrcOfs = P.LightOfs;
+        for (int32 Y = 0; Y < P.H; Y++)
+        {
+            const int32 SrcRow = SrcOfs + Y * P.W;
+            const int32 DstRow = (P.Y + Y) * AtlasSize + P.X;
+            for (int32 X = 0; X < P.W; X++)
+            {
+                AtlasData[DstRow + X] = Model.lightdata[SrcRow + X];
+            }
+        }
+
+        // simple padding: duplicate edge luxels into the padding area
+        const int32 Pad = 2;
+        for (int32 Y = -Pad; Y < P.H + Pad; Y++)
+        {
+            const int32 SrcY = FMath::Clamp(Y, 0, P.H - 1);
+            for (int32 X = -Pad; X < P.W + Pad; X++)
+            {
+                const int32 SrcX = FMath::Clamp(X, 0, P.W - 1);
+                const int32 DstX = P.X + X;
+                const int32 DstY = P.Y + Y;
+                if (DstX < 0 || DstY < 0 || DstX >= AtlasSize || DstY >= AtlasSize)
+                {
+                    continue;
+                }
+                const uint8 V = Model.lightdata[SrcOfs + SrcY * P.W + SrcX];
+                AtlasData[DstY * AtlasSize + DstX] = V;
+            }
+        }
+    }
+
+    TArray<QuakeCommon::QColor> GrayPalette;
+    GrayPalette.SetNumUninitialized(256);
+    for (int32 I = 0; I < 256; I++)
+    {
+        GrayPalette[I].r = uint8(I);
+        GrayPalette[I].g = uint8(I);
+        GrayPalette[I].b = uint8(I);
+    }
+
+    const FString TexName = FString::Printf(TEXT("LM_%s"), *MapName);
+    const FString TexAssetName = TEXT("T_") + TexName;
+    UPackage* TexPkg = CreateAssetPackage(LightmapsPath / TexAssetName);
+    if (!TexPkg)
+    {
+        return false;
+    }
+
+    UTexture2D* Tex = QuakeCommon::CreateOrUpdateUTexture2D(TexName, AtlasSize, AtlasSize, AtlasData, *TexPkg, GrayPalette, bOverwrite);
+    if (!Tex)
+    {
+        return false;
+    }
+
+	// Lightmaps should be filterable (unlike most Quake palette textures).
+	Tex->PreEditChange(nullptr);
+	Tex->SRGB = false;
+	Tex->Filter = TF_Default;
+	Tex->LODGroup = TEXTUREGROUP_World;
+	Tex->MipGenSettings = TMGS_NoMipmaps;
+	//Tex->CompressionSettings = TextureCompressionSettings::TC_Grayscale;
+	Tex->NeverStream = true;
+	Tex->UpdateResource();
+	Tex->PostEditChange();
+
+    OutAtlas.LightmapTextureObjectPath = Tex->GetPathName();
+    return true;
+}
+
+static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int32 FaceIndex, float S, float T, const FLightmapAtlas* Atlas)
+{
+    if (!Atlas)
+    {
+        return FVector2f(0.0f, 0.0f);
+    }
+
+    const FLightmapAtlasFace* Info = Atlas->FaceToAtlas.Find(FaceIndex);
+    if (!Info || Atlas->AtlasW <= 0 || Atlas->AtlasH <= 0)
+    {
+        return FVector2f(0.0f, 0.0f);
+    }
+
+    const float LMs = (S - float(Info->TexMinS)) / 16.0f;
+    const float LMt = (T - float(Info->TexMinT)) / 16.0f;
+
+    const float U = (float(Info->X) + LMs + 0.5f) / float(Atlas->AtlasW);
+    const float V = (float(Info->Y) + LMt + 0.5f) / float(Atlas->AtlasH);
+    return FVector2f(U, V);
+}
+
+    static void BuildStaticMesh(UStaticMesh* StaticMesh, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const FWorldChunkBuild& Chunk, int32 LightmapSize, const FName& CollisionProfileName, bool bGenerateLightmapUVs)
     {
         if (!StaticMesh)
         {
@@ -354,7 +704,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         SrcModel->BuildSettings.MinLightmapResolution = LightmapSize;
         SrcModel->BuildSettings.SrcLightmapIndex = 0;
         SrcModel->BuildSettings.DstLightmapIndex = 1;
-        SrcModel->BuildSettings.bGenerateLightmapUVs = true;
+        SrcModel->BuildSettings.bGenerateLightmapUVs = bGenerateLightmapUVs;
         SrcModel->BuildSettings.bUseFullPrecisionUVs = true;
 
         FRawMesh LocalCopy = Chunk.RawMesh;
@@ -397,7 +747,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         StaticMesh->PostEditChange();
     }
 
-    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
+    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths , const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         using namespace bsputils;
 
@@ -408,6 +758,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             TArray<int32> BspVertexIds;
             int32 TexInfo = 0;
             TArray<FVector2f> TexCoords;
+            TArray<FVector2f> LightmapST;
             FVector3f Center;
         };
 
@@ -475,13 +826,14 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 FVector2f TexCoord;
                 const FVector3f Unflipped(P.x, P.y, P.z);
 
-                TexCoord.X = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
-                TexCoord.Y = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
+                float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
+                float Traw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
 
-                TexCoord.X /= Tex.width;
-                TexCoord.Y /= Tex.height;
+                TexCoord.X = Sraw / Tex.width;
+                TexCoord.Y = Traw / Tex.height;
 
                 Temp.TexCoords.Add(TexCoord);
+                Temp.LightmapST.Add(FVector2f(Sraw, Traw));
             }
 
             Temp.Center = Sum / float(Temp.BspVertexIds.Num());
@@ -517,9 +869,9 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
                 const FVector3f N(Temp.Normal.X, Temp.Normal.Y, Temp.Normal.Z);
 
-                AddWedgeEntry(Chunk.RawMesh, VA, N, Temp.TexCoords[A], Temp.TexCoords[A]);
-                AddWedgeEntry(Chunk.RawMesh, VB, N, Temp.TexCoords[B], Temp.TexCoords[B]);
-                AddWedgeEntry(Chunk.RawMesh, VC, N, Temp.TexCoords[C], Temp.TexCoords[C]);
+                AddWedgeEntry(Chunk.RawMesh, VA, N, Temp.TexCoords[A], ComputeLightmapUVForFace(Model, F, Temp.LightmapST[A].X, Temp.LightmapST[A].Y, LightmapAtlas));
+                AddWedgeEntry(Chunk.RawMesh, VB, N, Temp.TexCoords[B], ComputeLightmapUVForFace(Model, F, Temp.LightmapST[B].X, Temp.LightmapST[B].Y, LightmapAtlas));
+                AddWedgeEntry(Chunk.RawMesh, VC, N, Temp.TexCoords[C], ComputeLightmapUVForFace(Model, F, Temp.LightmapST[C].X, Temp.LightmapST[C].Y, LightmapAtlas));
 
                 const int32 TextureId = Model.texinfos[Temp.TexInfo].miptex;
                 const int32 Slot = GetOrAddMaterialSlot(Chunk, TextureId);
@@ -541,7 +893,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -555,7 +907,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -577,7 +929,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutWaterMeshObjectPaths)
             {
@@ -598,7 +950,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutSkyMeshObjectPaths)
             {
@@ -607,7 +959,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         }
     }
 
-    static void CreateLeafChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
+    static void CreateLeafChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths , const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         using namespace bsputils;
 
@@ -696,6 +1048,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
                 TArray<int32> BspVertexIds;
                 TArray<FVector2f> TexCoords;
+                TArray<FVector2f> LightmapST;
 
                 for (int32 E = Face.numedges; E-- > 0;)
                 {
@@ -714,11 +1067,12 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                     const FVector3f Unflipped(P.x, P.y, P.z);
 
                     FVector2f TexCoord;
-                    TexCoord.X = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
-                    TexCoord.Y = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
-                    TexCoord.X /= Tex.width;
-                    TexCoord.Y /= Tex.height;
+float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
+                    float Traw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
+                    TexCoord.X = Sraw / Tex.width;
+                    TexCoord.Y = Traw / Tex.height;
                     TexCoords.Add(TexCoord);
+                    LightmapST.Add(FVector2f(Sraw, Traw));
                 }
 
                 const int32 NumTris = int32(Face.numedges) - 2;
@@ -733,9 +1087,9 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                     const uint32 VC = GetOrAddLocalVertex(Chunk, Model, BspVertexIds[C], ImportScale);
 
                     const FVector3f N(Normal.X, Normal.Y, Normal.Z);
-                    AddWedgeEntry(Chunk.RawMesh, VA, N, TexCoords[A], TexCoords[A]);
-                    AddWedgeEntry(Chunk.RawMesh, VB, N, TexCoords[B], TexCoords[B]);
-                    AddWedgeEntry(Chunk.RawMesh, VC, N, TexCoords[C], TexCoords[C]);
+                    AddWedgeEntry(Chunk.RawMesh, VA, N, TexCoords[A], ComputeLightmapUVForFace(Model, FaceIndex, LightmapST[A].X, LightmapST[A].Y, LightmapAtlas));
+                    AddWedgeEntry(Chunk.RawMesh, VB, N, TexCoords[B], ComputeLightmapUVForFace(Model, FaceIndex, LightmapST[B].X, LightmapST[B].Y, LightmapAtlas));
+                    AddWedgeEntry(Chunk.RawMesh, VC, N, TexCoords[C], ComputeLightmapUVForFace(Model, FaceIndex, LightmapST[C].X, LightmapST[C].Y, LightmapAtlas));
 
                     const int32 TextureId = Model.texinfos[Face.texinfo].miptex;
                     const int32 Slot = GetOrAddMaterialSlot(Chunk, TextureId);
@@ -758,7 +1112,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -772,7 +1126,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -794,7 +1148,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutWaterMeshObjectPaths)
             {
@@ -815,7 +1169,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutSkyMeshObjectPaths)
             {
@@ -824,7 +1178,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         }
     }
 
-    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& Model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath)
+    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& Model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath, const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         if (!Model.submodels.IsValidIndex(SubModelId))
         {
@@ -861,6 +1215,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
             TArray<int32> BspVertexIds;
             TArray<FVector2f> TexCoords;
+            TArray<FVector2f> LightmapST;
             BspVertexIds.Reserve(Face.numedges);
             TexCoords.Reserve(Face.numedges);
 
@@ -881,8 +1236,11 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const FVector3f Unflipped(P.x, P.y, P.z);
 
                 FVector2f TexCoord;
-                TexCoord.X = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
-                TexCoord.Y = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
+                const float S = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0][1], Ti.vecs[0][2])) + Ti.vecs[0][3];
+                const float T = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[1][0], Ti.vecs[1][1], Ti.vecs[1][2])) + Ti.vecs[1][3];
+                TexCoord.X = S;
+                TexCoord.Y = T;
+                LightmapST.Add(FVector2f(S, T));
                 TexCoord.X /= Tex.width;
                 TexCoord.Y /= Tex.height;
                 TexCoords.Add(TexCoord);
@@ -900,9 +1258,9 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
                 const uint32 VC = GetOrAddLocalVertex(Chunk, Model, BspVertexIds[C], ImportScale);
 
                 const FVector3f N(Normal.X, Normal.Y, Normal.Z);
-                AddWedgeEntry(Chunk.RawMesh, VA, N, TexCoords[A], TexCoords[A]);
-                AddWedgeEntry(Chunk.RawMesh, VB, N, TexCoords[B], TexCoords[B]);
-                AddWedgeEntry(Chunk.RawMesh, VC, N, TexCoords[C], TexCoords[C]);
+                AddWedgeEntry(Chunk.RawMesh, VA, N, TexCoords[A], ComputeLightmapUVForFace(Model, F, LightmapST[A].X, LightmapST[A].Y, LightmapAtlas));
+                AddWedgeEntry(Chunk.RawMesh, VB, N, TexCoords[B], ComputeLightmapUVForFace(Model, F, LightmapST[B].X, LightmapST[B].Y, LightmapAtlas));
+                AddWedgeEntry(Chunk.RawMesh, VC, N, TexCoords[C], ComputeLightmapUVForFace(Model, F, LightmapST[C].X, LightmapST[C].Y, LightmapAtlas));
 
                 const int32 TextureId = Model.texinfos[Face.texinfo].miptex;
                 const int32 Slot = GetOrAddMaterialSlot(Chunk, TextureId);
@@ -922,7 +1280,7 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
 
         const int32 LightmapSize = 64;
         const FName CollisionProfile = bAnyTriggerTex ? UCollisionProfile::NoCollision_ProfileName : DefaultCollisionProfile;
-        BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, CollisionProfile);
+        BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, CollisionProfile, LightmapAtlas == nullptr);
 
         OutObjectPath = StaticMesh->GetPathName();
         return true;
@@ -1125,15 +1483,15 @@ static void ResetStaticMeshForBuild(UStaticMesh* StaticMesh)
         delete rmesh;
     }
 
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths, const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         if (bChunkWorld)
         {
-            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, WorldChunkSize, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths);
+            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, WorldChunkSize, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, LightmapAtlas);
             return;
         }
 
-        CreateLeafChunks(MeshesPath, MapName, model, MaterialsByName, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths);
+        CreateLeafChunks(MeshesPath, MapName, model, MaterialsByName, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, LightmapAtlas);
     }
 
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data)

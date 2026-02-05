@@ -1,4 +1,4 @@
-#include "QuakeCommon.h"
+#include "QuakeImportCommon.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Interfaces/IPluginManager.h"

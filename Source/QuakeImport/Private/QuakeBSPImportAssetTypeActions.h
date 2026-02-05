@@ -2,7 +2,7 @@
 
 #include "AssetTypeActions_Base.h"
 
-class FQuakeBspImportAssetTypeActions : public FAssetTypeActions_Base
+class FQuakeBSPImportAssetTypeActions : public FAssetTypeActions_Base
 {
 public:
     virtual FText GetName() const override;
