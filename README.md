@@ -6,10 +6,11 @@ Currently only tested in UE 5.5.
 
 ## Features:
 - Creates chunked Static Meshes with collision from the BSP data
-- Creates and assigns shared Materials and derived Material Instances
-- Creates shared Textures
+- Creates shared Textures from BSP data
+- Creates and assigns Material Instances to imported meshes
 - Creates and updates Level Instances
 - Can import BSP World and BSP Entities separately
+- Can import lightmaps
 
 ## How to:
 - Extract `palette.lmp` from Quake `PAK0.PAK` to `QuakeImport/Content`
@@ -20,8 +21,6 @@ Currently only tested in UE 5.5.
 - Drag the created Level Instances or Static Meshes from `MyProject/Content/Q1/*mapname*` to your level
 
 ### Todo:
-- Add support for BSP2
-- Add support for importing colored lightmaps
 - Bug fixing
 
 > [!NOTE]
