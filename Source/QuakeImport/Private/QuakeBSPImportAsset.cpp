@@ -11,7 +11,7 @@
 UQuakeBSPImportAsset::UQuakeBSPImportAsset()
 {
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MatSolid(TEXT("/QuakeImport/M_BSP_Solid.M_BSP_Solid"));
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MatSolidLightmap(TEXT("/QuakeImport/M_BSP_Solid_Lightmap.M_BSP_Solid_Lightmap"));
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MatSolidMasked(TEXT("/QuakeImport/M_BSP_Solid_Masked.M_BSP_Solid_Masked"));
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MatWater(TEXT("/QuakeImport/M_BSP_Liquid.M_BSP_Liquid"));
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MatSky(TEXT("/QuakeImport/M_BSP_Sky.M_BSP_Sky"));
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MatTrigger(TEXT("/QuakeImport/M_BSP_Trigger.M_BSP_Trigger"));
@@ -21,15 +21,10 @@ UQuakeBSPImportAsset::UQuakeBSPImportAsset()
 		BSPWorldSolidMaterial = MatSolid.Object;
 		BSPEntitySolidMaterial = MatSolid.Object;
 	}
-	if (MatSolidLightmap.Succeeded())
+	if (MatSolidMasked.Succeeded())
 	{
-		BSPWorldSolidLightmapMaterial = MatSolidLightmap.Object;
-		BSPEntitySolidLightmapMaterial = MatSolidLightmap.Object;
-	}
-	if (MatSolidLightmap.Succeeded())
-	{
-		BSPWorldSolidLightmapMaterial = MatSolidLightmap.Object;
-		BSPEntitySolidLightmapMaterial = MatSolidLightmap.Object;
+		BSPWorldMaskedMaterial = MatSolidMasked.Object;
+		BSPEntityMaskedMaterial = MatSolidMasked.Object;
 	}
 	if (MatWater.Succeeded())
 	{
@@ -55,15 +50,16 @@ TArray<FString> BspMeshes;
 TArray<FString> WaterMeshes;
 TArray<FString> SkyMeshes;
 
-UMaterialInterface* BspParent = bImportLightmaps ? BSPWorldSolidLightmapMaterial.LoadSynchronous() : BSPWorldSolidMaterial.LoadSynchronous();
+UMaterialInterface* BspParent = BSPWorldSolidMaterial.LoadSynchronous();
 if (!BspParent)
 {
 BspParent = BSPWorldSolidMaterial.LoadSynchronous();
 }
+UMaterialInterface* MaskedParent = BSPWorldMaskedMaterial.LoadSynchronous();
 UMaterialInterface* WaterParent = BSPWorldLiquidMaterial.LoadSynchronous();
 UMaterialInterface* SkyParent = BSPWorldSkyMaterial.LoadSynchronous();
 
-	if (!QuakeBspImportRunner::ImportBspWorld(BSPFile.FilePath, FolderPath, WorldChunkMode, WorldChunkSize, ImportScale, bBSPWorldImportSky, bBSPWorldImportLiquids, bImportLightmaps, bOverwriteMaterialsAndTextures, BspParent, WaterParent, SkyParent, BSPWorldSolidCollisionProfile.Name, BSPLiquidCollisionProfile.Name, BSPSkyCollisionProfile.Name, &BspMeshes, &WaterMeshes, &SkyMeshes))
+	if (!QuakeBspImportRunner::ImportBspWorld(BSPFile.FilePath, FolderPath, BSPLitFile.FilePath, WorldChunkMode, WorldChunkSize, ImportScale, bBSPWorldImportSky, bBSPWorldImportLiquids, bImportLightmaps, bOverwriteMaterialsAndTextures, BspParent, WaterParent, SkyParent, MaskedParent, BSPWorldSolidCollisionProfile.Name, BSPWorldMaskedCollisionProfile.Name, BSPLiquidCollisionProfile.Name, BSPSkyCollisionProfile.Name, &BspMeshes, &WaterMeshes, &SkyMeshes))
 {
 return;
 }
@@ -92,16 +88,17 @@ const FString MapName = FPaths::GetBaseFilename(BSPFile.FilePath);
 	TArray<FString> SolidEntityMeshes;
 	TArray<FString> TriggerEntityMeshes;
 
-	UMaterialInterface* SolidParent = bImportLightmaps ? BSPEntitySolidLightmapMaterial.LoadSynchronous() : BSPEntitySolidMaterial.LoadSynchronous();
+	UMaterialInterface* SolidParent = BSPEntitySolidMaterial.LoadSynchronous();
 	if (!SolidParent)
 	{
 		SolidParent = BSPEntitySolidMaterial.LoadSynchronous();
 	}
+	UMaterialInterface* MaskedParent = BSPEntityMaskedMaterial.LoadSynchronous();
 	UMaterialInterface* TriggerParent = BSPEntityTriggerMaterial.LoadSynchronous();
 	UMaterialInterface* WaterParent = BSPWorldLiquidMaterial.LoadSynchronous();
 	UMaterialInterface* SkyParent = BSPWorldSkyMaterial.LoadSynchronous();
 
-	if (!QuakeBspImportRunner::ImportBspEntities(BSPFile.FilePath, FolderPath, ImportScale, bImportFuncDoors, bImportFuncPlats, bImportFuncTriggers, bImportLightmaps, bOverwriteMaterialsAndTextures, SolidParent, WaterParent, SkyParent, TriggerParent, BSPEntitySolidCollisionProfile.Name, BSPEntityTriggerCollisionProfile.Name, &SolidEntityMeshes, &TriggerEntityMeshes))
+	if (!QuakeBspImportRunner::ImportBspEntities(BSPFile.FilePath, FolderPath, BSPLitFile.FilePath, ImportScale, bImportFuncDoors, bImportFuncPlats, bImportFuncTriggers, bImportLightmaps, bOverwriteMaterialsAndTextures, SolidParent, WaterParent, SkyParent, TriggerParent, MaskedParent, BSPEntitySolidCollisionProfile.Name, BSPEntityMaskedCollisionProfile.Name, BSPEntityTriggerCollisionProfile.Name, &SolidEntityMeshes, &TriggerEntityMeshes))
 {
 return;
 }

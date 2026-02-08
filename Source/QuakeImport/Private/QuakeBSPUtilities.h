@@ -84,8 +84,8 @@ namespace bsputils
 
         struct Edge
         {
-            short first;
-            short second;
+            int32 first;
+            int32 second;
         };
 
         struct Surfedge
@@ -95,7 +95,7 @@ namespace bsputils
 
         struct Marksurface
         {
-            short index;
+            int32 index;
         };
 
         struct Plane
@@ -107,15 +107,15 @@ namespace bsputils
 
         struct Face
         {
-            short   planenum;
-            short   side;
+            int32   planenum;
+            int32   side;
 
-            int     firstedge;
-            short   numedges;
-            short   texinfo;
+            int32   firstedge;
+            int32   numedges;
+            int32   texinfo;
 
-            char    styles[MAXLIGHTMAPS];
-            int     lightofs;
+            uint8   styles[MAXLIGHTMAPS];
+            int32   lightofs;
         };
 
         struct Leaf
@@ -123,23 +123,73 @@ namespace bsputils
             ELeafContentType    contents;
             int                 visofs;
 
-            short               mins[3];
-            short               maxs[3];
+            int32               mins[3];
+            int32               maxs[3];
 
-            unsigned short      firstmarksurface;
-            unsigned short      nummarksurfaces;
+            int32               firstmarksurface;
+            int32               nummarksurfaces;
 
             char                ambient_level[4];
         };
 
         struct Node
         {
-            int			    planenum;
-            short           children[2];
-            short           mins[3];
-            short           maxs[3];
-            unsigned short	firstface;
-            unsigned short	numfaces;
+            int32           planenum;
+            int32           children[2];
+            int32           mins[3];
+            int32           maxs[3];
+            int32           firstface;
+            int32           numfaces;
+        };
+
+        // ---- On-disk structs for BSP29 (used only for deserialization) ----
+
+        struct FileEdge
+        {
+            int16 first;
+            int16 second;
+        };
+
+        struct FileMarksurface
+        {
+            int16 index;
+        };
+
+        struct FileFace
+        {
+            int16   planenum;
+            int16   side;
+
+            int32   firstedge;
+            int16   numedges;
+            int16   texinfo;
+
+            uint8   styles[MAXLIGHTMAPS];
+            int32   lightofs;
+        };
+
+        struct FileLeaf
+        {
+            ELeafContentType contents;
+            int32            visofs;
+
+            int16            mins[3];
+            int16            maxs[3];
+
+            uint16           firstmarksurface;
+            uint16           nummarksurfaces;
+
+            char             ambient_level[4];
+        };
+
+        struct FileNode
+        {
+            int32  planenum;
+            int16  children[2];
+            int16  mins[3];
+            int16  maxs[3];
+            uint16 firstface;
+            uint16 numfaces;
         };
 
         struct SubModel
@@ -193,6 +243,91 @@ namespace bsputils
             FString             entities;
             TArray<uint8>       lightdata;
             TArray<uint8>       visdata;
+        };
+    }
+
+    // BSP2 / 2PSB: Quake 1 BSP format extensions that lift many 16-bit limits by
+    // switching indices to 32-bit while keeping the same lump directory.
+    namespace bspformat2
+    {
+        constexpr char HEADER_IDENT_BSP2[4] = { 'B', 'S', 'P', '2' };
+        constexpr char HEADER_IDENT_2PSB[4] = { '2', 'P', 'S', 'B' };
+
+        // BSP2 / 2PSB isn't completely uniform across tools; some writers store
+        // a 4-byte ident followed by a 32-bit version, while others omit the
+        // version and start the lump directory immediately.
+        struct Header
+        {
+            char                ident[4];
+            int32               version;
+            bspformat29::Lump   lumps[bspformat29::HEADER_LUMP_SIZE];
+        };
+
+        // Variant header used by some BSP2 / 2PSB files: no explicit version.
+        struct HeaderNoVersion
+        {
+            char                ident[4];
+            bspformat29::Lump   lumps[bspformat29::HEADER_LUMP_SIZE];
+        };
+
+        struct FileEdge
+        {
+            int32 first;
+            int32 second;
+        };
+
+        struct FileMarksurface
+        {
+            int32 index;
+        };
+
+        struct FileFace
+        {
+            int32 planenum;
+            int32 side;
+
+            int32 firstedge;
+            int32 numedges;
+            int32 texinfo;
+
+            uint8 styles[bspformat29::MAXLIGHTMAPS];
+            int32 lightofs;
+        };
+
+        struct FileLeaf
+        {
+            ELeafContentType contents;
+            int32            visofs;
+
+            int16            mins[3];
+            int16            maxs[3];
+
+            int32            firstmarksurface;
+            int32            nummarksurfaces;
+
+            char             ambient_level[4];
+        };
+
+        struct FileNode
+        {
+            int32 planenum;
+            int32 children[2];
+            int16 mins[3];
+            int16 maxs[3];
+            int32 firstface;
+            int32 numfaces;
+        };
+
+        // BSP2 model lump uses 32-bit indices.
+        struct FileModel
+        {
+            float mins[3];
+            float maxs[3];
+            float origin[3];
+            int32 headnode[4];
+            int32 visleafs;
+            int32 firstface;
+            int32 numfaces;
         };
     }
 
@@ -271,16 +406,16 @@ namespace bsputils
         FString LightmapTextureObjectPath;
     };
 
-    bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& LightmapsPath, const FString& MapName, bool bOverwrite, FLightmapAtlas& OutAtlas);
+    bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& LightmapsPath, const FString& MapName, const FString& LitFilePath, bool bOverwrite, FLightmapAtlas& OutAtlas);
 
     
     // From a Quake BSP model, import submodels to individual staticmeshes.
     // If bChunkWorld is true, submodel_0 (world) is split into multiple meshes.
     // Chunking can be grid based (WorldChunkSize) or leaf based (when WorldChunkSize is ignored).
     // OutWorldMeshObjectPaths will be filled with object paths for the created world chunks (or submodel_0 if not chunked).
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths, const FLightmapAtlas* LightmapAtlas);
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>& MaskedTextureNames, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& MaskedCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths, const FLightmapAtlas* LightmapAtlas);
 
-    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath, const FLightmapAtlas* LightmapAtlas);
+    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>& MaskedTextureNames, float ImportScale, const FName& DefaultCollisionProfile, const FName& MaskedCollisionProfile, FString& OutObjectPath, const FLightmapAtlas* LightmapAtlas);
 
     // Append texture pixel data to array
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data);

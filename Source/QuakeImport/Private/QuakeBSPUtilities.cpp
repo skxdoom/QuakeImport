@@ -16,6 +16,8 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "Engine/CollisionProfile.h"
 #include "RawMesh.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -37,50 +39,456 @@ namespace bsputils
         m_dataStart = data;
         m_dataSize = dataSize;
 
-        if (!m_dataStart || m_dataSize < int64(sizeof(bspformat29::Header)))
+        if (!m_dataStart || m_dataSize < 4)
         {
             return;
         }
 
-        bspformat29::Header header;
-
-        QuakeCommon::ReadData<bspformat29::Header>(m_dataStart, 0, header);
-
-        if (header.version != bspformat29::HEADER_VERSION_29)
-        {
-            return;
-        }
+        const char* Magic = reinterpret_cast<const char*>(m_dataStart);
+        const bool bIsBsp2 =
+            (m_dataSize >= int64(sizeof(bspformat2::HeaderNoVersion))) &&
+            (FMemory::Memcmp(Magic, bspformat2::HEADER_IDENT_BSP2, 4) == 0 || FMemory::Memcmp(Magic, bspformat2::HEADER_IDENT_2PSB, 4) == 0);
 
         m_bsp29 = new bspformat29::Bsp_29();
 
-        // Validate lump bounds before deserializing to avoid crashes on malformed/unsupported BSPs.
-        for (int LumpIndex = 0; LumpIndex < bspformat29::HEADER_LUMP_SIZE; LumpIndex++)
+        auto ValidateLumps = [this](const bspformat29::Lump* Lumps, int32 Count)
         {
-            const bspformat29::Lump& L = header.lumps[LumpIndex];
-            const int64 Pos = int64(L.position);
-            const int64 Len = int64(L.length);
-            if (Pos < 0 || Len < 0 || Pos + Len > m_dataSize)
+            for (int32 LumpIndex = 0; LumpIndex < Count; LumpIndex++)
             {
-                UE_LOG(LogTemp, Warning, TEXT("BSP Import: Lump %d out of bounds (pos=%d len=%d size=%lld)"), LumpIndex, L.position, L.length, m_dataSize);
+                const bspformat29::Lump& L = Lumps[LumpIndex];
+                const int64 Pos = int64(L.position);
+                const int64 Len = int64(L.length);
+                if (Pos < 0 || Len < 0 || Pos + Len > m_dataSize)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("BSP Import: Lump %d out of bounds (pos=%d len=%d size=%lld)"), LumpIndex, L.position, L.length, m_dataSize);
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        auto DeserializeEdges29 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat29::FileEdge> Tmp;
+            if (!DeserializeLump<bspformat29::FileEdge>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->edges.Reset(Tmp.Num());
+            m_bsp29->edges.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                m_bsp29->edges[i].first = int32(Tmp[i].first);
+                m_bsp29->edges[i].second = int32(Tmp[i].second);
+            }
+            return true;
+        };
+
+        auto DeserializeMarks29 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat29::FileMarksurface> Tmp;
+            if (!DeserializeLump<bspformat29::FileMarksurface>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->marksurfaces.Reset(Tmp.Num());
+            m_bsp29->marksurfaces.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                m_bsp29->marksurfaces[i].index = int32(Tmp[i].index);
+            }
+            return true;
+        };
+
+        auto DeserializeFaces29 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat29::FileFace> Tmp;
+            if (!DeserializeLump<bspformat29::FileFace>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->faces.Reset(Tmp.Num());
+            m_bsp29->faces.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::Face& Dst = m_bsp29->faces[i];
+                const bspformat29::FileFace& Src = Tmp[i];
+
+                Dst.planenum = int32(Src.planenum);
+                Dst.side = int32(Src.side);
+                Dst.firstedge = Src.firstedge;
+                Dst.numedges = int32(Src.numedges);
+                Dst.texinfo = int32(Src.texinfo);
+                FMemory::Memcpy(Dst.styles, Src.styles, bspformat29::MAXLIGHTMAPS);
+                Dst.lightofs = Src.lightofs;
+            }
+            return true;
+        };
+
+        auto DeserializeLeaves29 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat29::FileLeaf> Tmp;
+            if (!DeserializeLump<bspformat29::FileLeaf>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->leaves.Reset(Tmp.Num());
+            m_bsp29->leaves.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::Leaf& Dst = m_bsp29->leaves[i];
+                const bspformat29::FileLeaf& Src = Tmp[i];
+
+                Dst.contents = Src.contents;
+                Dst.visofs = Src.visofs;
+                for (int32 a = 0; a < 3; a++)
+                {
+                    Dst.mins[a] = int32(Src.mins[a]);
+                    Dst.maxs[a] = int32(Src.maxs[a]);
+                }
+                Dst.firstmarksurface = int32(Src.firstmarksurface);
+                Dst.nummarksurfaces = int32(Src.nummarksurfaces);
+                FMemory::Memcpy(Dst.ambient_level, Src.ambient_level, 4);
+            }
+            return true;
+        };
+
+        auto DeserializeNodes29 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat29::FileNode> Tmp;
+            if (!DeserializeLump<bspformat29::FileNode>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->nodes.Reset(Tmp.Num());
+            m_bsp29->nodes.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::Node& Dst = m_bsp29->nodes[i];
+                const bspformat29::FileNode& Src = Tmp[i];
+
+                Dst.planenum = Src.planenum;
+                Dst.children[0] = int32(Src.children[0]);
+                Dst.children[1] = int32(Src.children[1]);
+                for (int32 a = 0; a < 3; a++)
+                {
+                    Dst.mins[a] = int32(Src.mins[a]);
+                    Dst.maxs[a] = int32(Src.maxs[a]);
+                }
+                Dst.firstface = int32(Src.firstface);
+                Dst.numfaces = int32(Src.numfaces);
+            }
+            return true;
+        };
+
+        auto DeserializeEdges2 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat2::FileEdge> Tmp;
+            if (!DeserializeLump<bspformat2::FileEdge>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->edges.Reset(Tmp.Num());
+            m_bsp29->edges.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                m_bsp29->edges[i].first = Tmp[i].first;
+                m_bsp29->edges[i].second = Tmp[i].second;
+            }
+            return true;
+        };
+
+        auto DeserializeMarks2 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat2::FileMarksurface> Tmp;
+            if (!DeserializeLump<bspformat2::FileMarksurface>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->marksurfaces.Reset(Tmp.Num());
+            m_bsp29->marksurfaces.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                m_bsp29->marksurfaces[i].index = Tmp[i].index;
+            }
+            return true;
+        };
+
+        auto DeserializeFaces2 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat2::FileFace> Tmp;
+            if (!DeserializeLump<bspformat2::FileFace>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->faces.Reset(Tmp.Num());
+            m_bsp29->faces.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::Face& Dst = m_bsp29->faces[i];
+                const bspformat2::FileFace& Src = Tmp[i];
+
+                Dst.planenum = Src.planenum;
+                Dst.side = Src.side;
+                Dst.firstedge = Src.firstedge;
+                Dst.numedges = Src.numedges;
+                Dst.texinfo = Src.texinfo;
+                FMemory::Memcpy(Dst.styles, Src.styles, bspformat29::MAXLIGHTMAPS);
+                Dst.lightofs = Src.lightofs;
+            }
+            return true;
+        };
+
+        auto DeserializeLeaves2 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat2::FileLeaf> Tmp;
+            if (!DeserializeLump<bspformat2::FileLeaf>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->leaves.Reset(Tmp.Num());
+            m_bsp29->leaves.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::Leaf& Dst = m_bsp29->leaves[i];
+                const bspformat2::FileLeaf& Src = Tmp[i];
+
+                Dst.contents = Src.contents;
+                Dst.visofs = Src.visofs;
+                for (int32 a = 0; a < 3; a++)
+                {
+                    Dst.mins[a] = int32(Src.mins[a]);
+                    Dst.maxs[a] = int32(Src.maxs[a]);
+                }
+                Dst.firstmarksurface = Src.firstmarksurface;
+                Dst.nummarksurfaces = Src.nummarksurfaces;
+                FMemory::Memcpy(Dst.ambient_level, Src.ambient_level, 4);
+            }
+            return true;
+        };
+
+        auto DeserializeNodes2 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat2::FileNode> Tmp;
+            if (!DeserializeLump<bspformat2::FileNode>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->nodes.Reset(Tmp.Num());
+            m_bsp29->nodes.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::Node& Dst = m_bsp29->nodes[i];
+                const bspformat2::FileNode& Src = Tmp[i];
+
+                Dst.planenum = Src.planenum;
+                Dst.children[0] = Src.children[0];
+                Dst.children[1] = Src.children[1];
+                for (int32 a = 0; a < 3; a++)
+                {
+                    Dst.mins[a] = int32(Src.mins[a]);
+                    Dst.maxs[a] = int32(Src.maxs[a]);
+                }
+                Dst.firstface = Src.firstface;
+                Dst.numfaces = Src.numfaces;
+            }
+            return true;
+        };
+
+        auto DeserializeModels2 = [this](const bspformat29::Lump& Lump)
+        {
+            TArray<bspformat2::FileModel> Tmp;
+            if (!DeserializeLump<bspformat2::FileModel>(m_dataStart, Lump, Tmp))
+            {
+                return false;
+            }
+
+            m_bsp29->submodels.Reset(Tmp.Num());
+            m_bsp29->submodels.SetNumUninitialized(Tmp.Num());
+            for (int32 i = 0; i < Tmp.Num(); i++)
+            {
+                bspformat29::SubModel& Dst = m_bsp29->submodels[i];
+                const bspformat2::FileModel& Src = Tmp[i];
+
+                FMemory::Memcpy(Dst.mins, Src.mins, sizeof(Dst.mins));
+                FMemory::Memcpy(Dst.maxs, Src.maxs, sizeof(Dst.maxs));
+                FMemory::Memcpy(Dst.origin, Src.origin, sizeof(Dst.origin));
+                for (int32 h = 0; h < 4; h++)
+                {
+                    Dst.headnode[h] = int32(Src.headnode[h]);
+                }
+                Dst.visleafs = int32(Src.visleafs);
+                Dst.firstface = int32(Src.firstface);
+                Dst.numfaces = int32(Src.numfaces);
+            }
+            return true;
+        };
+
+        bspformat29::Lump Lumps[bspformat29::HEADER_LUMP_SIZE];
+        if (bIsBsp2)
+        {
+            auto ReadI32 = [](const uint8* Ptr, bool bSwap)
+            {
+                int32 V = 0;
+                FMemory::Memcpy(&V, Ptr, sizeof(int32));
+                if (bSwap)
+                {
+                    V = int32(BYTESWAP_ORDER32(uint32(V)));
+                }
+                return V;
+            };
+
+            auto TryHeader = [this, &ReadI32](const bspformat29::Lump* InLumps, bool bSwap, bspformat29::Lump* OutLumps)
+            {
+                if (!InLumps || !OutLumps)
+                {
+                    return false;
+                }
+
+                bspformat29::Lump Tmp[bspformat29::HEADER_LUMP_SIZE];
+                for (int32 i = 0; i < bspformat29::HEADER_LUMP_SIZE; i++)
+                {
+                    Tmp[i].position = bSwap ? int32(BYTESWAP_ORDER32(uint32(InLumps[i].position))) : InLumps[i].position;
+                    Tmp[i].length = bSwap ? int32(BYTESWAP_ORDER32(uint32(InLumps[i].length))) : InLumps[i].length;
+                }
+
+                /*if (!ValidateLumps(Tmp, bspformat29::HEADER_LUMP_SIZE))
+                {
+                    return false;
+                }*/
+
+                // Extra sanity: texture lump should contain a reasonable count.
+                const bspformat29::Lump& TexLump = Tmp[bspformat29::LUMP_TEXTURES];
+                const int64 Pos = int64(TexLump.position);
+                const int64 Len = int64(TexLump.length);
+                if (Pos < 0 || Len < int64(sizeof(int32)) || Pos + int64(sizeof(int32)) > m_dataSize)
+                {
+                    return false;
+                }
+
+                const int32 NumTex = ReadI32(m_dataStart + Pos, bSwap);
+                if (NumTex < 0 || NumTex > 131072)
+                {
+                    return false;
+                }
+
+                // Make sure the offsets table fits.
+                const int64 OffsTableEnd = Pos + int64(sizeof(int32)) + int64(NumTex) * int64(sizeof(int32));
+                if (NumTex > 0 && OffsTableEnd > m_dataSize)
+                {
+                    return false;
+                }
+
+                // Require some essential lumps to be non-empty.
+                const auto& Verts = Tmp[bspformat29::LUMP_VERTEXES];
+                const auto& Edges = Tmp[bspformat29::LUMP_EDGES];
+                const auto& Faces = Tmp[bspformat29::LUMP_FACES];
+                const auto& Texinfo = Tmp[bspformat29::LUMP_TEXINFO];
+                const auto& Models = Tmp[bspformat29::LUMP_MODELS];
+                if (Verts.length <= 0 || Edges.length <= 0 || Faces.length <= 0 || Texinfo.length <= 0 || Models.length <= 0)
+                {
+                    return false;
+                }
+
+                FMemory::Memcpy(OutLumps, Tmp, sizeof(Lumps));
+                return true;
+            };
+
+            // First try the common (ident + version + lumps) layout.
+            bool bGotValid = false;
+            const bool bSwap = false;// (BspMagic[0] == '2' && BspMagic[1] == 'P' && BspMagic[2] == 'S' && BspMagic[3] == 'B');
+            if (m_dataSize >= int64(sizeof(bspformat2::Header)))
+            {
+                bspformat2::Header H;
+                FMemory::Memcpy(&H, m_dataStart, sizeof(H));
+                bGotValid = TryHeader(H.lumps, bSwap, Lumps);
+            }
+
+            // Fallback: ident + lumps (no version).
+            if (!bGotValid)
+            {
+                bspformat2::HeaderNoVersion Hnv;
+                FMemory::Memcpy(&Hnv, m_dataStart, sizeof(Hnv));
+                bGotValid = TryHeader(Hnv.lumps, bSwap, Lumps);
+            }
+
+            if (!bGotValid)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("BSP Import: Failed to parse BSP2 header (no valid lump directory found)"));
+                return;
+            }
+        }
+        else
+        {
+            if (m_dataSize < int64(sizeof(bspformat29::Header)))
+            {
+                return;
+            }
+
+            bspformat29::Header H;
+            QuakeCommon::ReadData<bspformat29::Header>(m_dataStart, 0, H);
+            if (H.version != bspformat29::HEADER_VERSION_29)
+            {
+                delete m_bsp29;
+                m_bsp29 = nullptr;
+                return;
+            }
+
+            FMemory::Memcpy(Lumps, H.lumps, sizeof(Lumps));
+        }
+
+        if (!bIsBsp2)
+        {
+            if (!ValidateLumps(Lumps, bspformat29::HEADER_LUMP_SIZE))
+            {
                 return;
             }
         }
 
-        DeserializeLump<bspformat29::Point3f>(m_dataStart, header.lumps[bspformat29::LUMP_VERTEXES], m_bsp29->vertices);
-        DeserializeLump<bspformat29::Edge>(data, header.lumps[bspformat29::LUMP_EDGES], m_bsp29->edges);
-        DeserializeLump<bspformat29::Surfedge>(data, header.lumps[bspformat29::LUMP_SURFEDGES], m_bsp29->surfedges);
-        DeserializeLump<bspformat29::Face>(data, header.lumps[bspformat29::LUMP_FACES], m_bsp29->faces);
-        DeserializeLump<uint8>(data, header.lumps[bspformat29::LUMP_LIGHTING], m_bsp29->lightdata);
-        DeserializeLump<bspformat29::Plane>(data, header.lumps[bspformat29::LUMP_PLANES], m_bsp29->planes);
-        DeserializeLump<bspformat29::Marksurface>(data, header.lumps[bspformat29::LUMP_MARKSURFACES], m_bsp29->marksurfaces);
-        DeserializeLump<bspformat29::Leaf>(data, header.lumps[bspformat29::LUMP_LEAFS], m_bsp29->leaves);
-        DeserializeLump<bspformat29::Node>(data, header.lumps[bspformat29::LUMP_NODES], m_bsp29->nodes);
-        DeserializeLump<bspformat29::SubModel>(data, header.lumps[bspformat29::LUMP_MODELS], m_bsp29->submodels);
-        DeserializeLump<bspformat29::TexInfo>(data, header.lumps[bspformat29::LUMP_TEXINFO], m_bsp29->texinfos);
-        DeserializeLump<uint8>(data, header.lumps[bspformat29::LUMP_VISIBILITY], m_bsp29->visdata);
+        DeserializeLump<bspformat29::Point3f>(m_dataStart, Lumps[bspformat29::LUMP_VERTEXES], m_bsp29->vertices);
+        DeserializeLump<bspformat29::Surfedge>(data, Lumps[bspformat29::LUMP_SURFEDGES], m_bsp29->surfedges);
+        DeserializeLump<uint8>(data, Lumps[bspformat29::LUMP_LIGHTING], m_bsp29->lightdata);
+        DeserializeLump<bspformat29::Plane>(data, Lumps[bspformat29::LUMP_PLANES], m_bsp29->planes);
+        if (bIsBsp2)
+        {
+            DeserializeModels2(Lumps[bspformat29::LUMP_MODELS]);
+        }
+        else
+        {
+            DeserializeLump<bspformat29::SubModel>(data, Lumps[bspformat29::LUMP_MODELS], m_bsp29->submodels);
+        }
+        DeserializeLump<bspformat29::TexInfo>(data, Lumps[bspformat29::LUMP_TEXINFO], m_bsp29->texinfos);
+        DeserializeLump<uint8>(data, Lumps[bspformat29::LUMP_VISIBILITY], m_bsp29->visdata);
 
-        LoadTextures(data, header.lumps[bspformat29::LUMP_TEXTURES]);
-        LoadEntities(data, header.lumps[bspformat29::LUMP_ENTITIES]);
+        if (bIsBsp2)
+        {
+            DeserializeEdges2(Lumps[bspformat29::LUMP_EDGES]);
+            DeserializeFaces2(Lumps[bspformat29::LUMP_FACES]);
+            DeserializeMarks2(Lumps[bspformat29::LUMP_MARKSURFACES]);
+            DeserializeLeaves2(Lumps[bspformat29::LUMP_LEAFS]);
+            DeserializeNodes2(Lumps[bspformat29::LUMP_NODES]);
+        }
+        else
+        {
+            DeserializeEdges29(Lumps[bspformat29::LUMP_EDGES]);
+            DeserializeFaces29(Lumps[bspformat29::LUMP_FACES]);
+            DeserializeMarks29(Lumps[bspformat29::LUMP_MARKSURFACES]);
+            DeserializeLeaves29(Lumps[bspformat29::LUMP_LEAFS]);
+            DeserializeNodes29(Lumps[bspformat29::LUMP_NODES]);
+        }
+
+        LoadTextures(data, Lumps[bspformat29::LUMP_TEXTURES]);
+        LoadEntities(data, Lumps[bspformat29::LUMP_ENTITIES]);
     }
 
     void BspLoader::LoadTextures(const uint8*& data, const bspformat29::Lump& lump)
@@ -416,13 +824,45 @@ static void ComputeFaceLightmapDimensions(const bspformat29::Bsp_29& Model, int3
     OutH = (ExtT / 16) + 1;
 }
 
-bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& LightmapsPath, const FString& MapName, bool bOverwrite, FLightmapAtlas& OutAtlas)
+bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& LightmapsPath, const FString& MapName, const FString& LitFilePath, bool bOverwrite, FLightmapAtlas& OutAtlas)
 {
     OutAtlas = FLightmapAtlas();
 
     if (Model.lightdata.Num() == 0)
     {
         return false;
+    }
+
+    TArray<uint8> LitRgbData;
+    bool bUseLit = false;
+    if (!LitFilePath.IsEmpty())
+    {
+        FString LitAbs = LitFilePath;
+        if (FPaths::IsRelative(LitAbs))
+        {
+            LitAbs = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), LitAbs);
+        }
+
+        TArray<uint8> LitFile;
+        if (FFileHelper::LoadFileToArray(LitFile, *LitAbs))
+        {
+            const int32 HeaderSize = 8;
+            if (LitFile.Num() >= HeaderSize)
+            {
+                const char* Magic = reinterpret_cast<const char*>(LitFile.GetData());
+                int32 Version = 0;
+                FMemory::Memcpy(&Version, LitFile.GetData() + 4, sizeof(int32));
+                const int64 Expected = int64(Model.lightdata.Num()) * 3;
+                const int64 Payload = int64(LitFile.Num()) - HeaderSize;
+
+                if (FMemory::Memcmp(Magic, "QLIT", 4) == 0 && Version == 1 && Payload == Expected)
+                {
+                    LitRgbData.Reset(int32(Expected));
+                    LitRgbData.Append(LitFile.GetData() + HeaderSize, int32(Expected));
+                    bUseLit = true;
+                }
+            }
+        }
     }
 
     TArray<FFaceLightmapCalc> Faces;
@@ -568,7 +1008,15 @@ bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& Lightma
     OutAtlas.AtlasH = AtlasSize;
 
     TArray<uint8> AtlasData;
-    AtlasData.SetNumZeroed(AtlasSize * AtlasSize);
+    TArray<uint8> AtlasDataBGRA;
+    if (bUseLit)
+    {
+        AtlasDataBGRA.SetNumZeroed(AtlasSize * AtlasSize * 4);
+    }
+    else
+    {
+        AtlasData.SetNumZeroed(AtlasSize * AtlasSize);
+    }
 
     for (const FPlaced& P : Placed)
     {
@@ -589,7 +1037,19 @@ bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& Lightma
             const int32 DstRow = (P.Y + Y) * AtlasSize + P.X;
             for (int32 X = 0; X < P.W; X++)
             {
-                AtlasData[DstRow + X] = Model.lightdata[SrcRow + X];
+                if (bUseLit)
+                {
+                    const int32 SrcIdx = (SrcRow + X) * 3;
+                    const int32 DstIdx = (DstRow + X) * 4;
+                    AtlasDataBGRA[DstIdx + 0] = LitRgbData[SrcIdx + 2];
+                    AtlasDataBGRA[DstIdx + 1] = LitRgbData[SrcIdx + 1];
+                    AtlasDataBGRA[DstIdx + 2] = LitRgbData[SrcIdx + 0];
+                    AtlasDataBGRA[DstIdx + 3] = 255;
+                }
+                else
+                {
+                    AtlasData[DstRow + X] = Model.lightdata[SrcRow + X];
+                }
             }
         }
 
@@ -607,19 +1067,22 @@ bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& Lightma
                 {
                     continue;
                 }
-                const uint8 V = Model.lightdata[SrcOfs + SrcY * P.W + SrcX];
-                AtlasData[DstY * AtlasSize + DstX] = V;
+                if (bUseLit)
+                {
+                    const int32 SrcIdx = (SrcOfs + SrcY * P.W + SrcX) * 3;
+                    const int32 DstIdx = (DstY * AtlasSize + DstX) * 4;
+                    AtlasDataBGRA[DstIdx + 0] = LitRgbData[SrcIdx + 2];
+                    AtlasDataBGRA[DstIdx + 1] = LitRgbData[SrcIdx + 1];
+                    AtlasDataBGRA[DstIdx + 2] = LitRgbData[SrcIdx + 0];
+                    AtlasDataBGRA[DstIdx + 3] = 255;
+                }
+                else
+                {
+                    const uint8 V = Model.lightdata[SrcOfs + SrcY * P.W + SrcX];
+                    AtlasData[DstY * AtlasSize + DstX] = V;
+                }
             }
         }
-    }
-
-    TArray<QuakeCommon::QColor> GrayPalette;
-    GrayPalette.SetNumUninitialized(256);
-    for (int32 I = 0; I < 256; I++)
-    {
-        GrayPalette[I].r = uint8(I);
-        GrayPalette[I].g = uint8(I);
-        GrayPalette[I].b = uint8(I);
     }
 
     const FString TexName = FString::Printf(TEXT("LM_%s"), *MapName);
@@ -630,7 +1093,23 @@ bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& Lightma
         return false;
     }
 
-    UTexture2D* Tex = QuakeCommon::CreateOrUpdateUTexture2D(TexName, AtlasSize, AtlasSize, AtlasData, *TexPkg, GrayPalette, bOverwrite);
+    UTexture2D* Tex = nullptr;
+    if (bUseLit)
+    {
+        Tex = QuakeCommon::CreateOrUpdateUTexture2DFromBGRA(TexName, AtlasSize, AtlasSize, AtlasDataBGRA, *TexPkg, bOverwrite);
+    }
+    else
+    {
+        TArray<QuakeCommon::QColor> GrayPalette;
+        GrayPalette.SetNumUninitialized(256);
+        for (int32 I = 0; I < 256; I++)
+        {
+            GrayPalette[I].r = uint8(I);
+            GrayPalette[I].g = uint8(I);
+            GrayPalette[I].b = uint8(I);
+        }
+        Tex = QuakeCommon::CreateOrUpdateUTexture2D(TexName, AtlasSize, AtlasSize, AtlasData, *TexPkg, GrayPalette, bOverwrite, false);
+    }
     if (!Tex)
     {
         return false;
@@ -642,7 +1121,7 @@ bool BuildLightmapAtlas(const bspformat29::Bsp_29& Model, const FString& Lightma
 	Tex->Filter = TF_Default;
 	Tex->LODGroup = TEXTUREGROUP_World;
 	Tex->MipGenSettings = TMGS_NoMipmaps;
-	//Tex->CompressionSettings = TextureCompressionSettings::TC_Grayscale;
+	Tex->CompressionSettings = TextureCompressionSettings::TC_VectorDisplacementmap;
 	Tex->NeverStream = true;
 	Tex->UpdateResource();
 	Tex->PostEditChange();
@@ -672,18 +1151,30 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
     return FVector2f(U, V);
 }
 
-    static void BuildStaticMesh(UStaticMesh* StaticMesh, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const FWorldChunkBuild& Chunk, int32 LightmapSize, const FName& CollisionProfileName, bool bGenerateLightmapUVs)
+static UMaterialInterface* GetWorldGridMaterial()
+{
+    static UMaterialInterface* Cached = LoadObject<UMaterialInterface>(
+        nullptr, TEXT("/Engine/EngineMaterials/WorldGridMaterial.WorldGridMaterial"));
+    return Cached ? Cached : UMaterial::GetDefaultMaterial(MD_Surface);
+}
+
+    static void BuildStaticMesh(UStaticMesh* StaticMesh, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>* MaskedTextureNames, const FWorldChunkBuild& Chunk, int32 LightmapSize, const FName& CollisionProfileName, const FName& MaskedCollisionProfileName, bool bGenerateLightmapUVs)
     {
         if (!StaticMesh)
         {
             return;
         }
 
+        bool bHasMaskedTexture = false;
         for (int32 Slot = 0; Slot < Chunk.SlotToTextureId.Num(); Slot++)
         {
             const int32 TextureId = Chunk.SlotToTextureId[Slot];
             const FString& MatName = Model.textures[TextureId].name;
             const FString SafeSlotName = SanitizeSurfaceNameForAsset(MatName);
+            if (!bHasMaskedTexture && MaskedTextureNames && MaskedTextureNames->Contains(MatName))
+            {
+                bHasMaskedTexture = true;
+            }
 
             UMaterialInterface* Material = nullptr;
 
@@ -694,7 +1185,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
 
             if (!Material)
             {
-                Material = UMaterial::GetDefaultMaterial(MD_Surface);
+                Material = GetWorldGridMaterial();
             }
 
             StaticMesh->GetStaticMaterials().Add(FStaticMaterial(Material, FName(*SafeSlotName), FName(*SafeSlotName)));
@@ -727,12 +1218,17 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
 
         if (BodySetup)
         {
-            const bool bEnableCollision = (CollisionProfileName != NAME_None) && (CollisionProfileName != UCollisionProfile::NoCollision_ProfileName);
+            FName EffectiveCollisionProfile = CollisionProfileName;
+            if (bHasMaskedTexture && MaskedCollisionProfileName != NAME_None && CollisionProfileName != UCollisionProfile::NoCollision_ProfileName)
+            {
+                EffectiveCollisionProfile = MaskedCollisionProfileName;
+            }
+            const bool bEnableCollision = (EffectiveCollisionProfile != NAME_None) && (EffectiveCollisionProfile != UCollisionProfile::NoCollision_ProfileName);
 
             if (bEnableCollision)
             {
                 BodySetup->CollisionTraceFlag = CTF_UseComplexAsSimple;
-                BodySetup->DefaultInstance.SetCollisionProfileName(CollisionProfileName);
+                BodySetup->DefaultInstance.SetCollisionProfileName(EffectiveCollisionProfile);
                 BodySetup->InvalidatePhysicsData();
                 BodySetup->CreatePhysicsMeshes();
             }
@@ -747,7 +1243,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
         StaticMesh->PostEditChange();
     }
 
-    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, int32 ChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths , const bsputils::FLightmapAtlas* LightmapAtlas)
+    static void CreateWorldChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>& MaskedTextureNames, int32 ChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& MaskedCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths , const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         using namespace bsputils;
 
@@ -772,8 +1268,21 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
         TMap<FIntVector, FWorldChunkBuild> WaterChunkMap;
         TMap<FIntVector, FWorldChunkBuild> SkyChunkMap;
 
-        const int32 FirstFace = Model.submodels[0].firstface;
-        const int32 FaceCount = Model.submodels[0].numfaces;
+        int32 FirstFace = 0;
+        int32 FaceCount = 0;
+
+        if (Model.submodels.Num() > 0)
+        {
+            FirstFace = Model.submodels[0].firstface;
+            FaceCount = Model.submodels[0].numfaces;
+        }
+        else
+        {
+            // Some malformed files (or failed model lump parse) may yield an empty submodel list.
+            // Fall back to treating the entire faces lump as the world model to avoid a hard crash.
+            FirstFace = 0;
+            FaceCount = Model.faces.Num();
+        }
 
         for (int32 F = FirstFace; F < FirstFace + FaceCount; F++)
         {
@@ -893,7 +1402,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Pair.Opaque, LightmapSize, BspCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -907,7 +1416,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Pair.Transparent, LightmapSize, BspCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -929,7 +1438,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile, LightmapAtlas == nullptr);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Chunk, LightmapSize, WaterCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutWaterMeshObjectPaths)
             {
@@ -950,7 +1459,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile, LightmapAtlas == nullptr);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Chunk, LightmapSize, SkyCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutSkyMeshObjectPaths)
             {
@@ -959,7 +1468,7 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
         }
     }
 
-    static void CreateLeafChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths , const bsputils::FLightmapAtlas* LightmapAtlas)
+    static void CreateLeafChunks(const FString& MeshesPath, const FString& MapName, const bspformat29::Bsp_29& Model, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>& MaskedTextureNames, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& MaskedCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths , const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         using namespace bsputils;
 
@@ -988,7 +1497,8 @@ static FVector2f ComputeLightmapUVForFace(const bspformat29::Bsp_29& Model, int3
             FLeafPair& Pair = LeafToChunk.FindOrAdd(LeafIndex);
 
             TSet<int32> FaceSet;
-            for (uint32 I = 0; I < Leaf.nummarksurfaces; I++)
+            const uint32 NumMarkSurfaces = (uint32)Leaf.nummarksurfaces;
+            for (uint32 I = 0; I < NumMarkSurfaces; I++)
             {
                 const int32 MsIndex = int32(Leaf.firstmarksurface) + int32(I);
                 if (!Model.marksurfaces.IsValidIndex(MsIndex))
@@ -1112,7 +1622,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Opaque, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Pair.Opaque, LightmapSize, BspCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -1126,7 +1636,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
                 const FString LongPkg = MeshesPath / ChunkName;
                 UPackage* Pkg = CreateAssetPackage(LongPkg);
                 UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-                BuildStaticMesh(StaticMesh, Model, MaterialsByName, Pair.Transparent, LightmapSize, BspCollisionProfile, LightmapAtlas == nullptr);
+                BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Pair.Transparent, LightmapSize, BspCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
                 if (OutBspMeshObjectPaths)
                 {
@@ -1148,7 +1658,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, WaterCollisionProfile, LightmapAtlas == nullptr);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Chunk, LightmapSize, WaterCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutWaterMeshObjectPaths)
             {
@@ -1169,7 +1679,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
             const FString LongPkg = MeshesPath / ChunkName;
             UPackage* Pkg = CreateAssetPackage(LongPkg);
             UStaticMesh* StaticMesh = GetOrCreateStaticMesh(*Pkg, ChunkName);
-            BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, SkyCollisionProfile, LightmapAtlas == nullptr);
+            BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Chunk, LightmapSize, SkyCollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
             if (OutSkyMeshObjectPaths)
             {
@@ -1178,7 +1688,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
         }
     }
 
-    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& Model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, float ImportScale, const FName& DefaultCollisionProfile, FString& OutObjectPath, const bsputils::FLightmapAtlas* LightmapAtlas)
+    bool CreateSubmodelStaticMesh(const bspformat29::Bsp_29& Model, const FString& MeshesPath, const FString& MeshAssetName, uint8 SubModelId, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>& MaskedTextureNames, float ImportScale, const FName& DefaultCollisionProfile, const FName& MaskedCollisionProfile, FString& OutObjectPath, const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         if (!Model.submodels.IsValidIndex(SubModelId))
         {
@@ -1280,7 +1790,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
 
         const int32 LightmapSize = 64;
         const FName CollisionProfile = bAnyTriggerTex ? UCollisionProfile::NoCollision_ProfileName : DefaultCollisionProfile;
-        BuildStaticMesh(StaticMesh, Model, MaterialsByName, Chunk, LightmapSize, CollisionProfile, LightmapAtlas == nullptr);
+        BuildStaticMesh(StaticMesh, Model, MaterialsByName, &MaskedTextureNames, Chunk, LightmapSize, CollisionProfile, MaskedCollisionProfile, LightmapAtlas == nullptr);
 
         OutObjectPath = StaticMesh->GetPathName();
         return true;
@@ -1308,9 +1818,16 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
 
         TArray<Triface> faces;
 
+        if (!model.submodels.IsValidIndex(id))
+        {
+            return;
+        }
+
+        const bspformat29::SubModel& SubModel = model.submodels[id];
+
         for (
-            int f = model.submodels[id].firstface;
-            f < (model.submodels[id].numfaces + model.submodels[id].firstface);
+            int f = SubModel.firstface;
+            f < (SubModel.numfaces + SubModel.firstface);
             f++
             )
         {
@@ -1339,14 +1856,14 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
                 const bspformat29::Surfedge& surfedge = model.surfedges[face.firstedge + e];
                 const bspformat29::Edge& edge = model.edges[abs(surfedge.index)];
 
-                short vertex_id = edge.first;
+                int32 vertex_id = edge.first;
 
                 if (surfedge.index < 0)
                 {
                     vertex_id = edge.second;
                 }
 
-                triface.points.Add(vertex_id);
+                triface.points.Add(uint32(vertex_id));
 
                 FVector2f tex_coord;
 
@@ -1421,7 +1938,7 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
 
                 if (!material)
                 {
-                    material = UMaterial::GetDefaultMaterial(MD_Surface);
+                    material = GetWorldGridMaterial();
                 }
 
                 int32 MaterialIndex = staticmesh->GetStaticMaterials().AddUnique(
@@ -1483,15 +2000,15 @@ float Sraw = FVector3f::DotProduct(Unflipped, FVector3f(Ti.vecs[0][0], Ti.vecs[0
         delete rmesh;
     }
 
-    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths, const bsputils::FLightmapAtlas* LightmapAtlas)
+    void ModelToStaticmeshes(const bspformat29::Bsp_29& model, const FString& MeshesPath, const FString& MapName, const TMap<FString, UMaterialInterface*>& MaterialsByName, const TSet<FString>& MaskedTextureNames, bool bChunkWorld, int32 WorldChunkSize, float ImportScale, bool bIncludeSky, bool bIncludeWater, const FName& BspCollisionProfile, const FName& MaskedCollisionProfile, const FName& WaterCollisionProfile, const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths, TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths, const bsputils::FLightmapAtlas* LightmapAtlas)
     {
         if (bChunkWorld)
         {
-            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, WorldChunkSize, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, LightmapAtlas);
+            CreateWorldChunks(MeshesPath, MapName, model, MaterialsByName, MaskedTextureNames, WorldChunkSize, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, MaskedCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, LightmapAtlas);
             return;
         }
 
-        CreateLeafChunks(MeshesPath, MapName, model, MaterialsByName, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, LightmapAtlas);
+        CreateLeafChunks(MeshesPath, MapName, model, MaterialsByName, MaskedTextureNames, ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, MaskedCollisionProfile, WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, LightmapAtlas);
     }
 
     bool AppendNextTextureData(const FString& name, const int frame, const bspformat29::Bsp_29& model, TArray<uint8>& data)

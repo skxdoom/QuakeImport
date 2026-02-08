@@ -11,8 +11,8 @@ DECLARE_LOG_CATEGORY_EXTERN(LogQuakeImporter, Log, All);
 UENUM(BlueprintType)
 enum class EWorldChunkMode : uint8
 {
-	Leaves UMETA(DisplayName="Leaves"),
-	Grid UMETA(DisplayName="Grid")
+	Grid UMETA(DisplayName="Grid"),
+	Leaves UMETA(DisplayName="Leaves")
 };
 
 UCLASS(BlueprintType)
@@ -29,12 +29,13 @@ public:
     UFUNCTION(CallInEditor, Category="Quake Import", meta = (DisplayName="Import BSP Entities"))
     void ImportEntities();
     
-    UPROPERTY(EditAnywhere, Category = "Quake Import", meta = (DisplayName="BSP File"))
+    UPROPERTY(EditAnywhere, Category = "Quake Import", meta = (DisplayName="BSP File (.bsp)"))
     FFilePath BSPFile;
 
     UPROPERTY(EditAnywhere, Category = "Quake Import")
     EWorldChunkMode WorldChunkMode = EWorldChunkMode::Grid;
 
+	// Increase for big maps, if needed
     UPROPERTY(EditAnywhere, Category = "Quake Import", meta=(ClampMin="1", EditCondition="WorldChunkMode==EWorldChunkMode::Grid", EditConditionHides))
     int32 WorldChunkSize = 512;
 
@@ -49,6 +50,10 @@ public:
 	// If enabled, the importer will extract Quake BSP lightmaps into a shared atlas texture and generate UV1 for meshes to sample it.
 	UPROPERTY(EditAnywhere, Category = "Quake Import")
 	bool bImportLightmaps = false;
+
+	// Optional .lit file (BSP2 colored lightmaps). If set and valid, it will be used instead of BSP lightdata.
+	UPROPERTY(EditAnywhere, Category = "Quake Import", meta=(DisplayName="BSP Lightmap File (.lit)", EditCondition="bImportLightmaps", EditConditionHides))
+	FFilePath BSPLitFile;
     
     // Include sky surfaces (textures starting with "sky") in the chunked BSP world geometry.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World", meta = (DisplayName="Import Sky"))
@@ -58,25 +63,29 @@ public:
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World", meta = (DisplayName="Import Liquids"))
     bool bBSPWorldImportLiquids = true;
 
-    // Optional override for the opaque BSP parent material. If unset, the importer creates/uses M_BSP_Surface.
+    // Optional override for the opaque BSP parent material. If unset, the importer uses WorldGridMaterial.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Material", meta = (DisplayName="World Solid Material"))
     TSoftObjectPtr<UMaterialInterface> BSPWorldSolidMaterial;
 
-    // Optional override for the opaque BSP parent material when importing BSP lightmaps.
-    UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Material", meta=(DisplayName="World Solid Lightmap Material", EditCondition="bImportLightmaps", EditConditionHides))
-    TSoftObjectPtr<UMaterialInterface> BSPWorldSolidLightmapMaterial;
+    // Optional override for masked BSP parent material (palette index 255). If unset, the importer uses WorldGridMaterial.
+    UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Material", meta = (DisplayName="World Masked Material"))
+    TSoftObjectPtr<UMaterialInterface> BSPWorldMaskedMaterial;
 
-    // Optional override for the liquid parent material. If unset, the importer creates/uses M_BSP_Transparent.
+    // Optional override for the liquid parent material. If unset, the importer uses WorldGridMaterial.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Material", meta = (DisplayName="World Liquid Material"))
     TSoftObjectPtr<UMaterialInterface> BSPWorldLiquidMaterial;
 
-    // Optional override for the sky parent material. If unset, the importer creates/uses an unlit master that drives Emissive from the texture.
+    // Optional override for the sky parent material. If unset, the importer uses WorldGridMaterial.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Material", meta = (DisplayName="World Sky Material"))
     TSoftObjectPtr<UMaterialInterface> BSPWorldSkyMaterial;
 
     // Collision profile for BSP chunk actors.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Collision", meta = (DisplayName="World Solid Collision Profile"))
     FCollisionProfileName BSPWorldSolidCollisionProfile = FCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
+
+    // Collision profile for masked BSP chunk actors (palette index 255).
+    UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Collision", meta = (DisplayName="World Masked Collision Profile"))
+    FCollisionProfileName BSPWorldMaskedCollisionProfile = FCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
 
     // Collision profile for water chunk actors.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP World|Collision", meta = (DisplayName="World Liquid Collision Profile"))
@@ -98,20 +107,24 @@ public:
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities", meta = (DisplayName="Import func_trigger"))
     bool bImportFuncTriggers = false;
     
-    // Optional override for the opaque BSP parent material. If unset, the importer creates/uses M_BSP_Surface.
+    // Optional override for the opaque BSP parent material. If unset, the importer uses WorldGridMaterial.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Material", meta = (DisplayName="Entity Solid Material"))
     TSoftObjectPtr<UMaterialInterface> BSPEntitySolidMaterial;
 
-    // Optional override for the opaque BSP entity parent material when importing BSP lightmaps.
-    UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Material", meta=(DisplayName="Entity Solid Lightmap Material", EditCondition="bImportLightmaps", EditConditionHides))
-    TSoftObjectPtr<UMaterialInterface> BSPEntitySolidLightmapMaterial;
+    // Optional override for masked BSP entity parent material (palette index 255). If unset, the importer uses WorldGridMaterial.
+    UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Material", meta = (DisplayName="Entity Masked Material"))
+    TSoftObjectPtr<UMaterialInterface> BSPEntityMaskedMaterial;
 
-    // Optional override for the water parent material. If unset, the importer creates/uses M_BSP_Transparent.
+    // Optional override for the water parent material. If unset, the importer uses WorldGridMaterial.
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Material", meta = (DisplayName="Entity Trigger Material"))
     TSoftObjectPtr<UMaterialInterface> BSPEntityTriggerMaterial;
     
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Collision", meta = (DisplayName="Entity Solid Collision Profile"))
     FCollisionProfileName BSPEntitySolidCollisionProfile = FCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
+
+    // Collision profile for masked BSP entity meshes (palette index 255).
+    UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Collision", meta = (DisplayName="Entity Masked Collision Profile"))
+    FCollisionProfileName BSPEntityMaskedCollisionProfile = FCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
     
     UPROPERTY(EditAnywhere, Category = "Quake Import|BSP Entities|Collision", meta = (DisplayName="Entity Trigger Collision Profile"))
     FCollisionProfileName BSPEntityTriggerCollisionProfile = FCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);

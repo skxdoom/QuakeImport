@@ -86,7 +86,7 @@ namespace
 		Out.MapName = FPaths::GetBaseFilename(Out.AbsPath);
 		Out.MapPath = TargetFolderLongPackagePath / Out.MapName;
 		Out.TexturesPath = TargetFolderLongPackagePath / TEXT("Textures");
-		Out.MaterialsPath = TargetFolderLongPackagePath / TEXT("Materials");
+		Out.MaterialsPath = Out.MapPath / TEXT("Materials");
 
 		if (!FFileHelper::LoadFileToArray(Out.FileData, *Out.AbsPath))
 		{
@@ -110,7 +110,8 @@ namespace
 	bool EnsureMaterials(const bsputils::bspformat29::Bsp_29& Model, const FString& TexturesPath,
 		const FString& MaterialsPath, bool bOverwriteMaterialsAndTextures, UMaterialInterface* BspParentOverride,
 		UMaterialInterface* WaterParentOverride, UMaterialInterface* SkyParentOverride,
-		UMaterialInterface* TriggerParentOverride, TMap<FString, UMaterialInterface*>& OutMaterialsByName)
+		UMaterialInterface* TriggerParentOverride, UMaterialInterface* MaskedParentOverride,
+		TMap<FString, UMaterialInterface*>& OutMaterialsByName, TSet<FString>& OutMaskedTextureNames)
 	{
 		TArray<QuakeCommon::QColor> QuakePalette;
 		if (!QuakeCommon::LoadPalette(QuakePalette))
@@ -120,49 +121,47 @@ namespace
 		}
 
 		UMaterialInterface* SurfaceParent = BspParentOverride;
-		if (!SurfaceParent)
-		{
-			const FString SurfaceMasterName = TEXT("M_BSP_Surface");
-			UPackage* SurfaceMasterPkg = CreateAssetPackage(MaterialsPath / SurfaceMasterName);
-			SurfaceParent = QuakeCommon::GetOrCreateMasterMaterial(SurfaceMasterName, *SurfaceMasterPkg);
-		}
-
 		UMaterialInterface* TransparentParent = WaterParentOverride;
-		if (!TransparentParent)
-		{
-			const FString TransparentMasterName = TEXT("M_BSP_Transparent");
-			UPackage* TransparentMasterPkg = CreateAssetPackage(MaterialsPath / TransparentMasterName);
-			TransparentParent = QuakeCommon::GetOrCreateTransparentMasterMaterial(
-				TransparentMasterName, *TransparentMasterPkg);
-		}
-
 		UMaterialInterface* SkyParent = SkyParentOverride;
-		if (!SkyParent)
-		{
-			const FString SkyMasterName = TEXT("M_BSP_SkyUnlit");
-			UPackage* SkyMasterPkg = CreateAssetPackage(MaterialsPath / SkyMasterName);
-			SkyParent = QuakeCommon::GetOrCreateSkyUnlitMasterMaterial(SkyMasterName, *SkyMasterPkg);
-		}
+		UMaterialInterface* MaskedParent = MaskedParentOverride;
 
 		auto CreateTexturePackageAndTexture = [&](const FString& TexOriginalName, int32 W, int32 H,
-			const TArray<uint8>& Src) -> UTexture2D*
+			const TArray<uint8>& Src, bool& bOutHasPaletteAlpha) -> UTexture2D*
 		{
+			bOutHasPaletteAlpha = false;
 			const FString SafeBaseName = SanitizeSurfaceNameForAsset(TexOriginalName);
 			const FString TexAssetName = TEXT("T_") + SafeBaseName;
 			UPackage* TexPkg = CreateAssetPackage(TexturesPath / TexAssetName);
-			return QuakeCommon::CreateOrUpdateUTexture2D(SafeBaseName, W, H, Src, *TexPkg, QuakePalette, bOverwriteMaterialsAndTextures);
+			for (const uint8& It : Src)
+			{
+				if (It == 255)
+				{
+					bOutHasPaletteAlpha = true;
+					break;
+				}
+			}
+			return QuakeCommon::CreateOrUpdateUTexture2D(SafeBaseName, W, H, Src, *TexPkg, QuakePalette, bOverwriteMaterialsAndTextures, true);
 		};
 
 		auto CreateMaterialForTextureName = [&](const FString& TextureName, const FString& SafeTextureName,
-		                                        UTexture2D* Texture) -> void
+		                                        UTexture2D* Texture, bool bHasPaletteAlpha) -> void
 		{
 			if (!Texture)
 			{
 				return;
 			}
 
+			if (bHasPaletteAlpha)
+			{
+				OutMaskedTextureNames.Add(TextureName);
+			}
+
 			UMaterialInterface* ParentMat = nullptr;
-			if (TriggerParentOverride && TextureName.StartsWith(TEXT("trigger"), ESearchCase::IgnoreCase))
+			if (bHasPaletteAlpha && MaskedParent)
+			{
+				ParentMat = MaskedParent;
+			}
+			else if (TriggerParentOverride && TextureName.StartsWith(TEXT("trigger"), ESearchCase::IgnoreCase))
 			{
 				ParentMat = TriggerParentOverride;
 			}
@@ -220,12 +219,12 @@ namespace
 						}
 					}
 				}
-
-				CreateTexturePackageAndTexture(SanitizeSurfaceNameForAsset(ItTex.name + TEXT("_front")),
-				                               ItTex.width / 2, ItTex.height, Front);
+				bool bHasPaletteAlpha = false;
+				CreateTexturePackageAndTexture(SanitizeSurfaceNameForAsset(ItTex.name + TEXT("_front")), ItTex.width / 2, ItTex.height, Front, bHasPaletteAlpha);
+				
 				UTexture2D* BackTex = CreateTexturePackageAndTexture(
-					SanitizeSurfaceNameForAsset(ItTex.name + TEXT("_back")), ItTex.width / 2, ItTex.height, Back);
-				CreateMaterialForTextureName(ItTex.name, SafeTexName, BackTex);
+					SanitizeSurfaceNameForAsset(ItTex.name + TEXT("_back")), ItTex.width / 2, ItTex.height, Back, bHasPaletteAlpha);
+				CreateMaterialForTextureName(ItTex.name, SafeTexName, BackTex, bHasPaletteAlpha);
 				continue;
 			}
 
@@ -240,14 +239,16 @@ namespace
 					NumFrames++;
 				}
 
+				bool bHasPaletteAlpha = false;
 				UTexture2D* FlipTex = CreateTexturePackageAndTexture(ItTex.name, ItTex.width, ItTex.height * NumFrames,
-				                                                     Data);
-				CreateMaterialForTextureName(ItTex.name, SafeTexName, FlipTex);
+				                                                     Data, bHasPaletteAlpha);
+				CreateMaterialForTextureName(ItTex.name, SafeTexName, FlipTex, bHasPaletteAlpha);
 				continue;
 			}
 
-			UTexture2D* Tex = CreateTexturePackageAndTexture(ItTex.name, ItTex.width, ItTex.height, ItTex.mip0);
-			CreateMaterialForTextureName(ItTex.name, SafeTexName, Tex);
+			bool bHasPaletteAlpha = false;
+			UTexture2D* Tex = CreateTexturePackageAndTexture(ItTex.name, ItTex.width, ItTex.height, ItTex.mip0, bHasPaletteAlpha);
+			CreateMaterialForTextureName(ItTex.name, SafeTexName, Tex, bHasPaletteAlpha);
 		}
 
 		return true;
@@ -339,11 +340,11 @@ namespace
 
 namespace QuakeBspImportRunner
 {
-	bool ImportBspWorld(const FString& BspFilePath, const FString& TargetFolderLongPackagePath,
+bool ImportBspWorld(const FString& BspFilePath, const FString& TargetFolderLongPackagePath, const FString& LitFilePath,
 		EWorldChunkMode WorldChunkMode, int32 WorldChunkSize, float ImportScale, bool bIncludeSky,
 		bool bIncludeWater, bool bImportLightmaps, bool bOverwriteMaterialsAndTextures, UMaterialInterface* BspParentOverride,
-	                    UMaterialInterface* WaterParentOverride, UMaterialInterface* SkyParentOverride,
-	                    const FName& BspCollisionProfile, const FName& WaterCollisionProfile,
+	                    UMaterialInterface* WaterParentOverride, UMaterialInterface* SkyParentOverride, UMaterialInterface* MaskedParentOverride,
+	                    const FName& BspCollisionProfile, const FName& MaskedCollisionProfile, const FName& WaterCollisionProfile,
 	                    const FName& SkyCollisionProfile, TArray<FString>* OutBspMeshObjectPaths,
 	                    TArray<FString>* OutWaterMeshObjectPaths, TArray<FString>* OutSkyMeshObjectPaths)
 	{
@@ -356,8 +357,9 @@ namespace QuakeBspImportRunner
 		}
 
 		TMap<FString, UMaterialInterface*> MaterialsByName;
+		TSet<FString> MaskedTextureNames;
 		if (!EnsureMaterials(*Ctx.Model, Ctx.TexturesPath, Ctx.MaterialsPath, bOverwriteMaterialsAndTextures, BspParentOverride, WaterParentOverride,
-			SkyParentOverride, nullptr, MaterialsByName))
+			SkyParentOverride, nullptr, MaskedParentOverride, MaterialsByName, MaskedTextureNames))
 		{
 			return false;
 		}
@@ -367,7 +369,7 @@ namespace QuakeBspImportRunner
 		if (bImportLightmaps)
 		{
 			const FString LightmapsPath = Ctx.MapPath / TEXT("Lightmaps");
-			if (bsputils::BuildLightmapAtlas(*Ctx.Model, LightmapsPath, Ctx.MapName, bOverwriteMaterialsAndTextures, Atlas))
+			if (bsputils::BuildLightmapAtlas(*Ctx.Model, LightmapsPath, Ctx.MapName, LitFilePath, bOverwriteMaterialsAndTextures, Atlas))
 			{
 				AtlasPtr = &Atlas;
 				UTexture2D* LightmapTex = LoadObject<UTexture2D>(nullptr, *Atlas.LightmapTextureObjectPath, nullptr, LOAD_Quiet | LOAD_NoWarn);
@@ -388,11 +390,11 @@ namespace QuakeBspImportRunner
 			}
 		}
 
-		const FString WorldMeshesPath = Ctx.MapPath / TEXT("World");
+		const FString WorldMeshesPath = Ctx.MapPath / TEXT("Meshes") / TEXT("World");
 		const bool bChunkWorld = (WorldChunkMode == EWorldChunkMode::Grid);
-		ModelToStaticmeshes(*Ctx.Model, WorldMeshesPath, Ctx.MapName, MaterialsByName, bChunkWorld, WorldChunkSize,
-		                    ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, WaterCollisionProfile,
-		                    SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, AtlasPtr);
+		ModelToStaticmeshes(*Ctx.Model, WorldMeshesPath, Ctx.MapName, MaterialsByName, MaskedTextureNames, bChunkWorld, WorldChunkSize,
+		                    ImportScale, bIncludeSky, bIncludeWater, BspCollisionProfile, MaskedCollisionProfile,
+		                    WaterCollisionProfile, SkyCollisionProfile, OutBspMeshObjectPaths, OutWaterMeshObjectPaths, OutSkyMeshObjectPaths, AtlasPtr);
 
 		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 		TArray<FString> Paths;
@@ -408,11 +410,11 @@ namespace QuakeBspImportRunner
 		return true;
 	}
 
-	bool ImportBspEntities(const FString& BspFilePath, const FString& TargetFolderLongPackagePath, float ImportScale,
+bool ImportBspEntities(const FString& BspFilePath, const FString& TargetFolderLongPackagePath, const FString& LitFilePath, float ImportScale,
 		bool bImportFuncDoors, bool bImportFuncPlats, bool bImportTriggers, bool bImportLightmaps, bool bOverwriteMaterialsAndTextures,
 		UMaterialInterface* SolidParentOverride, UMaterialInterface* WaterParentOverride,
-		UMaterialInterface* SkyParentOverride, UMaterialInterface* TriggerParentOverride,
-		const FName& SolidCollisionProfile, const FName& TriggerCollisionProfile,
+		UMaterialInterface* SkyParentOverride, UMaterialInterface* TriggerParentOverride, UMaterialInterface* MaskedParentOverride,
+		const FName& SolidCollisionProfile, const FName& MaskedCollisionProfile, const FName& TriggerCollisionProfile,
 		TArray<FString>* OutSolidEntityMeshObjectPaths, TArray<FString>* OutTriggerEntityMeshObjectPaths)
 	{
 		using namespace bsputils;
@@ -424,8 +426,9 @@ namespace QuakeBspImportRunner
 		}
 
 		TMap<FString, UMaterialInterface*> MaterialsByName;
+		TSet<FString> MaskedTextureNames;
 		if (!EnsureMaterials(*Ctx.Model, Ctx.TexturesPath, Ctx.MaterialsPath, bOverwriteMaterialsAndTextures,
-			SolidParentOverride, WaterParentOverride, SkyParentOverride, TriggerParentOverride, MaterialsByName))
+			SolidParentOverride, WaterParentOverride, SkyParentOverride, TriggerParentOverride, MaskedParentOverride, MaterialsByName, MaskedTextureNames))
 		{
 			return false;
 		}
@@ -433,14 +436,14 @@ namespace QuakeBspImportRunner
 		TArray<FParsedEntity> Parsed;
 		ParseEntitiesForBmodels(Ctx.Model->entities, Parsed);
 
-		const FString EntitiesMeshesPath = Ctx.MapPath / TEXT("Entities");
+		const FString EntitiesMeshesPath = Ctx.MapPath / TEXT("Meshes") / TEXT("Entities");
 
 		bsputils::FLightmapAtlas Atlas;
 		const bsputils::FLightmapAtlas* AtlasPtr = nullptr;
 		if (bImportLightmaps)
 		{
 			const FString LightmapsPath = Ctx.MapPath / TEXT("Lightmaps");
-			if (bsputils::BuildLightmapAtlas(*Ctx.Model, LightmapsPath, Ctx.MapName, bOverwriteMaterialsAndTextures, Atlas))
+			if (bsputils::BuildLightmapAtlas(*Ctx.Model, LightmapsPath, Ctx.MapName, LitFilePath, bOverwriteMaterialsAndTextures, Atlas))
 			{
 				AtlasPtr = &Atlas;
 				UTexture2D* LightmapTex = LoadObject<UTexture2D>(nullptr, *Atlas.LightmapTextureObjectPath, nullptr, LOAD_Quiet | LOAD_NoWarn);
@@ -506,8 +509,8 @@ namespace QuakeBspImportRunner
 
 			FString ObjPath;
 			if (!CreateSubmodelStaticMesh(*Ctx.Model, EntitiesMeshesPath, MeshName, uint8(E.SubModelIndex),
-				MaterialsByName, ImportScale, UseCollisionProfile.IsNone() ? UCollisionProfile::BlockAll_ProfileName : UseCollisionProfile,
-				ObjPath, AtlasPtr))
+				MaterialsByName, MaskedTextureNames, ImportScale, UseCollisionProfile.IsNone() ? UCollisionProfile::BlockAll_ProfileName : UseCollisionProfile,
+				MaskedCollisionProfile, ObjPath, AtlasPtr))
 			{
 				continue;
 			}

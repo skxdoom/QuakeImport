@@ -17,6 +17,16 @@
 namespace QuakeCommon
 {
     static const FName ColorParamName(TEXT("Color"));
+
+    static bool IsPlatformDataValid(const UTexture2D* Texture)
+    {
+        if (!Texture)
+        {
+            return false;
+        }
+        const FTexturePlatformData* PlatformData = Texture->GetPlatformData();
+        return PlatformData && PlatformData->SizeX > 0 && PlatformData->SizeY > 0 && PlatformData->Mips.Num() > 0;
+    }
     bool LoadPalette(TArray<QColor>& outPalette)
     {
         FString palFilename = IPluginManager::Get().FindPlugin(TEXT("QuakeImport"))->GetContentDir() / FString("palette.lmp");
@@ -35,7 +45,7 @@ namespace QuakeCommon
         return false;
     }
 
-	UTexture2D* CreateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool savePackage)
+	UTexture2D* CreateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool bUsePaletteAlpha, bool savePackage)
 	{
 		// Defensive validation: some BSPs reference external WAD textures (or contain bad miptex headers)
 		// which can yield invalid sizes and crash inside FTextureSource::Init.
@@ -57,7 +67,10 @@ namespace QuakeCommon
 		const FString FinalName = TEXT("T_") + name;
 		if (UTexture2D* Existing = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage))
 		{
-			return Existing;
+			if (IsPlatformDataValid(Existing))
+			{
+				return Existing;
+			}
 		}
 
 		TArray<uint8> FinalData;
@@ -67,7 +80,7 @@ namespace QuakeCommon
 			FinalData.Add(pal[It].b);
 			FinalData.Add(pal[It].g);
 			FinalData.Add(pal[It].r);
-			FinalData.Add(255);
+			FinalData.Add((bUsePaletteAlpha && It == 255) ? 0 : 255);
 		}
 
 		UTexture2D* Texture = NewObject<UTexture2D>(&texturePackage, FName(*FinalName), RF_Public | RF_Standalone);
@@ -107,11 +120,20 @@ namespace QuakeCommon
 		return Texture;
 	}
 
-	UTexture2D* CreateOrUpdateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool bOverwrite, bool savePackage)
+	UTexture2D* CreateOrUpdateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool bOverwrite, bool bUsePaletteAlpha, bool savePackage)
 	{
+		const FString FinalName = TEXT("T_") + name;
 		if (!bOverwrite)
 		{
-			return CreateUTexture2D(name, width, height, data, texturePackage, pal, savePackage);
+			if (UTexture2D* Existing = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage))
+			{
+				if (IsPlatformDataValid(Existing))
+				{
+					return Existing;
+				}
+			}
+
+			return CreateUTexture2D(name, width, height, data, texturePackage, pal, bUsePaletteAlpha, savePackage);
 		}
 		if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
 		{
@@ -124,8 +146,6 @@ namespace QuakeCommon
 			return nullptr;
 		}
 
-		const FString FinalName = TEXT("T_") + name;
-
 		TArray<uint8> FinalData;
 		FinalData.Reserve(int32(PixelCount) * 4);
 		for (const uint8& It : data)
@@ -133,7 +153,7 @@ namespace QuakeCommon
 			FinalData.Add(pal[It].b);
 			FinalData.Add(pal[It].g);
 			FinalData.Add(pal[It].r);
-			FinalData.Add(255);
+			FinalData.Add((bUsePaletteAlpha && It == 255) ? 0 : 255);
 		}
 
 		UTexture2D* Texture = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage);
@@ -177,6 +197,79 @@ namespace QuakeCommon
 		TexMip->BulkData.Unlock();
 
 		Texture->Source.Init(width, height, 1, 1, TSF_BGRA8, FinalData.GetData());
+		Texture->UpdateResource();
+		Texture->MarkPackageDirty();
+		texturePackage.MarkPackageDirty();
+		Texture->PostEditChange();
+		return Texture;
+	}
+
+	UTexture2D* CreateOrUpdateUTexture2DFromBGRA(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, bool bOverwrite, bool savePackage)
+	{
+		if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
+		{
+			return nullptr;
+		}
+
+		const int64 PixelCount = int64(width) * int64(height);
+		if (PixelCount <= 0 || data.Num() != PixelCount * 4)
+		{
+			return nullptr;
+		}
+
+		const FString FinalName = TEXT("T_") + name;
+		if (!bOverwrite)
+		{
+			if (UTexture2D* Existing = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage))
+			{
+				if (IsPlatformDataValid(Existing))
+				{
+					return Existing;
+				}
+			}
+		}
+
+		UTexture2D* Texture = CheckIfAssetExist<UTexture2D>(FinalName, texturePackage);
+		if (!Texture)
+		{
+			Texture = NewObject<UTexture2D>(&texturePackage, FName(*FinalName), RF_Public | RF_Standalone);
+			if (!Texture)
+			{
+				return nullptr;
+			}
+			FAssetRegistryModule::AssetCreated(Texture);
+		}
+
+		Texture->PreEditChange(nullptr);
+		Texture->SRGB = false;
+		Texture->Filter = TF_Default;
+		Texture->LODGroup = TEXTUREGROUP_World;
+		Texture->NeverStream = true;
+		Texture->MipGenSettings = TMGS_NoMipmaps;
+		Texture->CompressionSettings = TextureCompressionSettings::TC_Default;
+
+		FTexturePlatformData* PlatformData = Texture->GetPlatformData();
+		if (!PlatformData)
+		{
+			PlatformData = new FTexturePlatformData();
+			Texture->SetPlatformData(PlatformData);
+		}
+		PlatformData->SizeX = width;
+		PlatformData->SizeY = height;
+		PlatformData->PixelFormat = PF_B8G8R8A8;
+
+		PlatformData->Mips.Empty();
+		const int32 MipIndex = PlatformData->Mips.Add(new FTexture2DMipMap());
+		FTexture2DMipMap* TexMip = &PlatformData->Mips[MipIndex];
+		TexMip->SizeX = width;
+		TexMip->SizeY = height;
+		TexMip->BulkData.Lock(LOCK_READ_WRITE);
+		const uint32 TextureDataSize = uint32(PixelCount) * sizeof(uint8) * 4;
+		uint8* TextureData = (uint8*)TexMip->BulkData.Realloc(TextureDataSize);
+		FMemory::Memcpy(TextureData, data.GetData(), TextureDataSize);
+		TexMip->BulkData.Unlock();
+
+		Texture->Source.Init(width, height, 1, 1, TSF_BGRA8, data.GetData());
 		Texture->UpdateResource();
 		Texture->MarkPackageDirty();
 		texturePackage.MarkPackageDirty();

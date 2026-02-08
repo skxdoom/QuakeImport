@@ -25,7 +25,8 @@ namespace QuakeCommon
     UTexture2D* CreateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool savePackage = true);
 
 	// Create or update a UTexture2D. If bOverwrite is false and the texture exists, it will be reused as-is.
-	UTexture2D* CreateOrUpdateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool bOverwrite, bool savePackage = true);
+	UTexture2D* CreateOrUpdateUTexture2D(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, const TArray<QColor>& pal, bool bOverwrite, bool bUsePaletteAlpha, bool savePackage = true);
+	UTexture2D* CreateOrUpdateUTexture2DFromBGRA(const FString& name, int width, int height, const TArray<uint8>& data, UPackage& texturePackage, bool bOverwrite, bool savePackage = true);
 
     // Create matching material for texture
     void CreateUMaterial(const FString& textureName, UPackage& materialPackage, UTexture2D& initialTexture);
